@@ -1,4 +1,7 @@
 .gradle/
+.gradle-home/
+.android-sdk/
+.tools/
 .idea/
 *.iml
 build/

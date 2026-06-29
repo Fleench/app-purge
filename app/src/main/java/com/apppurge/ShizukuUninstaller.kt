@@ -29,11 +29,22 @@ object ShizukuUninstaller {
         if (!hasPermission()) return false
         return try {
             val command = arrayOf("pm", "uninstall", "--user", "0", packageName)
-            val process = Shizuku.newProcess(command, null, null)
+            val process = newShizukuProcess(command)
             process.waitFor() == 0
         } catch (_: Throwable) {
             false
         }
+    }
+
+    private fun newShizukuProcess(command: Array<String>): Process {
+        val method = Shizuku::class.java.getDeclaredMethod(
+            "newProcess",
+            Array<String>::class.java,
+            Array<String>::class.java,
+            String::class.java,
+        )
+        method.isAccessible = true
+        return method.invoke(null, command, null, null) as Process
     }
 
     fun launchFallbackUninstall(context: Context, packageName: String) {
