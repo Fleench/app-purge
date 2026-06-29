@@ -34,12 +34,19 @@ jobs:
         id: release
         shell: bash
         run: |
-          message="$(git log -1 --pretty=%s | tr -cs '[:alnum:].+_-' '-' | sed 's/^-//;s/-$//' | cut -c1-48)"
+          subject="$(git log -1 --pretty=%s)"
+          slug="$(printf '%s' "$subject" | tr -cs '[:alnum:]_-' '-' | cut -c1-48 | sed 's/^-//;s/-$//')"
           timestamp="$(date -u +'%Y%m%d%H%M%S')"
-          if [ -z "$message" ]; then
-            message="app-purge"
+          if [ -z "$slug" ]; then
+            slug="app-purge"
           fi
-          echo "tag=v-${timestamp}-${message}" >> "$GITHUB_OUTPUT"
+
+          tag="v-${timestamp}-${slug}"
+          if ! git check-ref-format --allow-onelevel "$tag"; then
+            tag="v-${timestamp}-app-purge"
+          fi
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
