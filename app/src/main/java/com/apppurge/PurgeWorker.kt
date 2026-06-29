@@ -24,11 +24,13 @@ class PurgeWorker(
 
         if (!Settings.canDrawOverlays(applicationContext)) {
             Notifications.showOverlayPermissionNotification(applicationContext, config.appName)
+            PurgeScheduler.scheduleRetry(applicationContext)
             return Result.success()
         }
 
         val intent = Intent(applicationContext, PurgeOverlayService::class.java)
         ContextCompat.startForegroundService(applicationContext, intent)
+        PurgeScheduler.scheduleRetry(applicationContext)
         return Result.success()
     }
 }
