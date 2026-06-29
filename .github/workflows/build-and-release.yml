@@ -34,7 +34,7 @@ jobs:
         id: release
         shell: bash
         run: |
-          message="$(git log -1 --pretty=%s | tr -cs '[:alnum:]._-+' '-' | sed 's/^-//;s/-$//' | cut -c1-48)"
+          message="$(git log -1 --pretty=%s | tr -cs '[:alnum:].+_-' '-' | sed 's/^-//;s/-$//' | cut -c1-48)"
           timestamp="$(date -u +'%Y%m%d%H%M%S')"
           if [ -z "$message" ]; then
             message="app-purge"
