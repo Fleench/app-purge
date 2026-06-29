@@ -20,3 +20,17 @@ JAVA_HOME="/tmp/app-purge-build-env/tools/jdk-17" ANDROID_HOME="/tmp/app-purge-b
 ```
 
 The APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
+
+
+## Install troubleshooting
+
+If Android reports `INSTALL_PARSE_FAILED_NO_CERTIFICATES` while installing a
+release APK, make sure you are installing the signed artifact:
+
+```sh
+app/build/outputs/apk/release/app-release.apk
+```
+
+The GitHub release workflow publishes this signed APK. Do not install or publish
+`app-release-unsigned.apk`; Android rejects unsigned APKs because it cannot find
+a signing certificate.
