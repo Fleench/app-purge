@@ -92,6 +92,12 @@ class PurgeOverlayService : Service() {
             Notifications.OVERLAY_NOTIFICATION_ID,
             Notifications.activePurgeNotification(this, config.appName),
         )
+        if (!android.provider.Settings.canDrawOverlays(this)) {
+            Notifications.showOverlayPermissionNotification(this, config.appName)
+            PurgeScheduler.scheduleRetry(applicationContext)
+            stopSelf()
+            return
+        }
         showOverlay(config)
     }
 

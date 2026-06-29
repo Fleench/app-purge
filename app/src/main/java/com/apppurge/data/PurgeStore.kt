@@ -11,6 +11,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import java.io.IOException
 
@@ -41,6 +42,8 @@ class PurgeStore(private val context: Context) {
                 snoozed = preferences[Keys.Snoozed] ?: false,
             )
         }
+
+    suspend fun currentConfig(): PurgeConfig? = config.first()
 
     suspend fun save(config: PurgeConfig) {
         context.purgeDataStore.edit { preferences ->

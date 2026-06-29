@@ -120,6 +120,21 @@ private fun AppPurgeApp() {
         if (!repository.isInstalled(current.packageName)) {
             store.clear()
             PurgeScheduler.cancel(context.applicationContext)
+            return@LaunchedEffect
+        }
+
+        if (current.purgeAtMillis <= System.currentTimeMillis()) {
+            if (Settings.canDrawOverlays(context.applicationContext)) {
+                ContextCompat.startForegroundService(
+                    context.applicationContext,
+                    Intent(context.applicationContext, PurgeOverlayService::class.java),
+                )
+            } else {
+                Notifications.showOverlayPermissionNotification(context.applicationContext, current.appName)
+                PurgeScheduler.scheduleRetry(context.applicationContext)
+            }
+        } else {
+            PurgeScheduler.schedule(context.applicationContext, current)
         }
     }
 
