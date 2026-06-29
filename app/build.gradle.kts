@@ -18,6 +18,10 @@ android {
 
     buildTypes {
         release {
+            // Sign local and CI release artifacts with the standard debug key so
+            // APKs published by the workflow are installable. Production
+            // distribution should replace this with a private release key.
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
