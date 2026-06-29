@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">App Purge</string>
+    <string name="shizuku_provider_authorities">com.apppurge.shizuku</string>
+</resources>
