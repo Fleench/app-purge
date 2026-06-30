@@ -12,14 +12,18 @@ android {
         applicationId = "com.apppurge"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.3.0"
+        versionCode = 6
+        versionName = "1.4.1"
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
-            // Sign local and CI release artifacts with the standard debug key so
-            // APKs published by the workflow are installable. Production
+            // Sign local, debug, and CI release artifacts with the same standard
+            // debug key so APK updates share a certificate and install over the
+            // existing app instead of requiring an uninstall. Production
             // distribution should replace this with a private release key.
             signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = false

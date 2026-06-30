@@ -32,12 +32,10 @@ class AppLockAccessibilityService : AccessibilityService() {
 
             lastBlockedPackage = foregroundPackage
             lastBlockedAtMillis = now
-            val intent = Intent(applicationContext, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                putExtra(MainActivity.EXTRA_SHOW_LOCK_GATE, true)
-                putExtra(MainActivity.EXTRA_LOCKED_PACKAGE, foregroundPackage)
+            val intent = Intent(applicationContext, AppLockOverlayService::class.java).apply {
+                putExtra(AppLockOverlayService.EXTRA_LOCKED_PACKAGE, foregroundPackage)
             }
-            startActivity(intent)
+            androidx.core.content.ContextCompat.startForegroundService(applicationContext, intent)
         }
     }
 
