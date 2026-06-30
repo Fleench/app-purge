@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -25,6 +26,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccessTime
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.CalendarToday
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Security
@@ -32,22 +39,25 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
-import androidx.compose.material3.Divider
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
@@ -59,6 +69,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -114,6 +125,7 @@ private fun AppPurgeApp() {
     var apps by remember { mutableStateOf<List<InstalledApp>>(emptyList()) }
     var selectedApp by remember { mutableStateOf<InstalledApp?>(null) }
     var currentPage by remember { mutableStateOf(AppPage.Home) }
+    var appListMode by remember { mutableStateOf(AppListMode.All) }
 
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -151,8 +163,17 @@ private fun AppPurgeApp() {
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("App Purge") },
+            LargeTopAppBar(
+                title = {
+                    Column {
+                        Text("App Purge")
+                        Text(
+                            "Pick temporary apps before they linger",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
                 navigationIcon = {
                     Icon(
                         imageVector = Icons.Filled.Delete,
@@ -162,31 +183,20 @@ private fun AppPurgeApp() {
                 },
             )
         },
-        bottomBar = {
-            if (selectedApp == null) {
-                NavigationBar {
-                    NavigationBarItem(
-                        selected = currentPage == AppPage.Home,
-                        onClick = { currentPage = AppPage.Home },
-                        icon = { Icon(Icons.Filled.Delete, contentDescription = null) },
-                        label = { Text("Home") },
-                    )
-                    NavigationBarItem(
-                        selected = currentPage == AppPage.Apps,
-                        onClick = { currentPage = AppPage.Apps },
-                        icon = { Icon(Icons.Filled.Security, contentDescription = null) },
-                        label = { Text("Apps") },
-                    )
-                }
-            }
-        },
     ) { padding ->
         if (selectedApp == null && currentPage == AppPage.Home) {
             HomeScreen(
                 modifier = Modifier.padding(padding),
                 config = config,
                 apps = apps,
-                onGoToApps = { currentPage = AppPage.Apps },
+                onGoToAllApps = {
+                    appListMode = AppListMode.All
+                    currentPage = AppPage.Apps
+                },
+                onGoToNewApps = {
+                    appListMode = AppListMode.NewThisWeek
+                    currentPage = AppPage.Apps
+                },
                 onCancelConfig = {
                     scope.launch {
                         store.clear()
@@ -212,7 +222,10 @@ private fun AppPurgeApp() {
         } else if (selectedApp == null) {
             AppsScreen(
                 modifier = Modifier.padding(padding),
-                apps = apps,
+                apps = appsForMode(apps, appListMode),
+                title = appListMode.title,
+                emptyMessage = appListMode.emptyMessage,
+                onBack = { currentPage = AppPage.Home },
                 onSelectApp = { selectedApp = it },
             )
         } else {
@@ -241,21 +254,47 @@ private fun AppPurgeApp() {
 
 private enum class AppPage { Home, Apps }
 
+private enum class AppListMode(
+    val title: String,
+    val emptyMessage: String,
+) {
+    All(
+        title = "All apps",
+        emptyMessage = "No apps found.",
+    ),
+    NewThisWeek(
+        title = "New apps this week",
+        emptyMessage = "No apps were installed in the last week.",
+    ),
+}
+
+private fun appsInstalledThisWeek(apps: List<InstalledApp>): List<InstalledApp> {
+    val cutoff = System.currentTimeMillis() - 7L * 24L * 60L * 60L * 1000L
+    return apps
+        .filter { it.firstInstallTimeMillis >= cutoff }
+        .sortedByDescending { it.firstInstallTimeMillis }
+}
+
+private fun appsForMode(apps: List<InstalledApp>, mode: AppListMode): List<InstalledApp> {
+    return when (mode) {
+        AppListMode.All -> apps
+        AppListMode.NewThisWeek -> appsInstalledThisWeek(apps).take(5)
+    }
+}
+
 @Composable
 private fun HomeScreen(
     modifier: Modifier,
     config: PurgeConfig?,
     apps: List<InstalledApp>,
-    onGoToApps: () -> Unit,
+    onGoToAllApps: () -> Unit,
+    onGoToNewApps: () -> Unit,
     onCancelConfig: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onRequestShizuku: () -> Unit,
 ) {
-    val newAppsCount = remember(apps) {
-        val cutoff = System.currentTimeMillis() - 7L * 24L * 60L * 60L * 1000L
-        apps.count { it.firstInstallTimeMillis >= cutoff }
-    }
+    val newAppsCount = remember(apps) { appsInstalledThisWeek(apps).size }
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -268,8 +307,20 @@ private fun HomeScreen(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                StatCard("Installed apps", apps.size.toString(), Modifier.weight(1f))
-                StatCard("New this week", newAppsCount.toString(), Modifier.weight(1f))
+                StatCard(
+                    title = "Installed apps",
+                    value = apps.size.toString(),
+                    icon = Icons.Filled.Apps,
+                    modifier = Modifier.weight(1f),
+                    onClick = onGoToAllApps,
+                )
+                StatCard(
+                    title = "New this week",
+                    value = newAppsCount.toString(),
+                    icon = Icons.Filled.AutoAwesome,
+                    modifier = Modifier.weight(1f),
+                    onClick = onGoToNewApps,
+                )
             }
         }
         item {
@@ -283,16 +334,30 @@ private fun HomeScreen(
             if (config != null) {
                 ActiveConfigCard(config = config, onCancelConfig = onCancelConfig)
             } else {
-                Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("No active purges", fontWeight = FontWeight.SemiBold)
-                        Text("Pick an app and choose when it should be removed.")
+                ElevatedCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.elevatedCardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    ),
+                ) {
+                    Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "No active purges",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            "Pick an app and choose when it should be removed.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             }
         }
         item {
-            Button(onClick = onGoToApps, modifier = Modifier.fillMaxWidth()) {
+            Button(onClick = onGoToAllApps, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Filled.Delete, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
                 Text("Set up a purge")
             }
         }
@@ -301,11 +366,45 @@ private fun HomeScreen(
 }
 
 @Composable
-private fun StatCard(title: String, value: String, modifier: Modifier = Modifier) {
-    Card(modifier) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(title)
-            Text(value, fontWeight = FontWeight.Bold)
+private fun StatCard(
+    title: String,
+    value: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    ElevatedCard(
+        modifier = modifier.clickable { onClick() },
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+        ),
+    ) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Surface(
+                color = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+                shape = MaterialTheme.shapes.large,
+            ) {
+                Icon(icon, contentDescription = null, modifier = Modifier.padding(10.dp))
+            }
+            Text(
+                value,
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    title,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+                Icon(
+                    Icons.Filled.ChevronRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
         }
     }
 }
@@ -314,6 +413,9 @@ private fun StatCard(title: String, value: String, modifier: Modifier = Modifier
 private fun AppsScreen(
     modifier: Modifier,
     apps: List<InstalledApp>,
+    title: String,
+    emptyMessage: String,
+    onBack: () -> Unit,
     onSelectApp: (InstalledApp) -> Unit,
 ) {
     LazyColumn(
@@ -324,7 +426,36 @@ private fun AppsScreen(
     ) {
         item {
             Spacer(Modifier.height(4.dp))
-            Text("All apps", fontWeight = FontWeight.SemiBold)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+                FilledTonalButton(onClick = onBack) {
+                    Icon(Icons.Filled.ArrowBack, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Home")
+                }
+            }
+        }
+        if (apps.isEmpty()) {
+            item {
+                ElevatedCard(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(
+                            Icons.Filled.AutoAwesome,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                        Text(emptyMessage, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
         }
         items(apps, key = { it.packageName }) { app ->
             AppRow(app = app, onClick = { onSelectApp(app) })
@@ -335,17 +466,21 @@ private fun AppsScreen(
 
 @Composable
 private fun AppRow(app: InstalledApp, onClick: () -> Unit) {
-    Card(
+    ElevatedCard(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick() },
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ),
     ) {
         val iconBitmap = remember(app.packageName) { app.icon.toBitmap(width = 96, height = 96).asImageBitmap() }
         ListItem(
             headlineContent = { Text(app.label) },
             supportingContent = { Text(app.packageName) },
-            leadingContent = { Image(iconBitmap, contentDescription = null, modifier = Modifier.size(40.dp)) },
+            leadingContent = { Image(iconBitmap, contentDescription = null, modifier = Modifier.size(44.dp)) },
             trailingContent = { AssistChip(onClick = onClick, label = { Text("Purge") }) },
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
         )
     }
 }
@@ -366,12 +501,21 @@ private fun PermissionPanel(
     val hasActions = !notificationsGranted || !overlayGranted || !shizukuReady
     if (!hasActions) return
 
-    Card(Modifier.fillMaxWidth()) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+        ),
+    ) {
         Column(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("Readiness", fontWeight = FontWeight.SemiBold)
+            Text(
+                "Readiness",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
             if (!notificationsGranted) {
                 PermissionRow(
                     icon = Icons.Filled.Notifications,
@@ -412,10 +556,16 @@ private fun PermissionRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Icon(icon, contentDescription = null)
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.primary,
+            shape = MaterialTheme.shapes.large,
+        ) {
+            Icon(icon, contentDescription = null, modifier = Modifier.padding(10.dp))
+        }
         Column(Modifier.weight(1f)) {
-            Text(title)
-            Text("Required")
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text("Required", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         OutlinedButton(onClick = onClick) {
             Text(action)
@@ -432,15 +582,27 @@ private fun ActiveConfigCard(config: PurgeConfig, onCancelConfig: () -> Unit) {
             .toLocalDateTime()
             .format(formatter)
     }
-    Card(Modifier.fillMaxWidth()) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+        ),
+    ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("Scheduled purge", fontWeight = FontWeight.SemiBold)
-            Text(config.appName)
-            Text(purgeDate)
-            Text(if (config.allowSnooze) "One 24h snooze allowed" else "No snooze")
+            Text(
+                "Scheduled purge",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(config.appName, style = MaterialTheme.typography.titleSmall)
+            Text(purgeDate, color = MaterialTheme.colorScheme.onTertiaryContainer)
+            Text(
+                if (config.allowSnooze) "One 24h snooze allowed" else "No snooze",
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+            )
             OutlinedButton(onClick = onCancelConfig) {
                 Text("Cancel")
             }
@@ -470,20 +632,28 @@ private fun ConfigureScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text("Configure purge", fontWeight = FontWeight.SemiBold)
-        Card(Modifier.fillMaxWidth()) {
+        Text(
+            "Configure purge",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+        )
+        ElevatedCard(Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(app.label, fontWeight = FontWeight.SemiBold)
-                Text(app.packageName)
+                Text(app.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(app.packageName, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        Button(onClick = { showDatePicker = true }, modifier = Modifier.fillMaxWidth()) {
+        FilledTonalButton(onClick = { showDatePicker = true }, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Filled.CalendarToday, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
             Text("Date: ${purgeDateTime.format(DateTimeFormatter.ofPattern("MMM d, yyyy"))}")
         }
-        Button(onClick = { showTimePicker = true }, modifier = Modifier.fillMaxWidth()) {
+        FilledTonalButton(onClick = { showTimePicker = true }, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Filled.AccessTime, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
             Text("Time: ${purgeDateTime.format(DateTimeFormatter.ofPattern("h:mm a"))}")
         }
         Row(
@@ -494,8 +664,19 @@ private fun ConfigureScreen(
             Text("Allow one-time 24h snooze")
             Switch(checked = allowSnooze, onCheckedChange = { allowSnooze = it })
         }
-        Divider()
-        Text("Purge at ${purgeDateTime.format(formatter)}")
+        HorizontalDivider()
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            shape = MaterialTheme.shapes.extraLarge,
+        ) {
+            Text(
+                "Purge at ${purgeDateTime.format(formatter)}",
+                modifier = Modifier.padding(16.dp),
+                style = MaterialTheme.typography.titleSmall,
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(onClick = onBack, modifier = Modifier.weight(1f)) {
                 Text("Back")
