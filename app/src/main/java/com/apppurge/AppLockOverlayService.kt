@@ -26,6 +26,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.DateFormat
+import java.util.Date
 
 class AppLockOverlayService : Service() {
     companion object {
@@ -122,10 +124,26 @@ class AppLockOverlayService : Service() {
             setPadding(0, 18, 0, 0)
             visibility = if (state.lastDecision.isBlank()) View.GONE else View.VISIBLE
         }
+        val cooldownUntilMillis = entry.cooldownUntilMillis.takeIf { it > System.currentTimeMillis() }
+        val cooldown = TextView(this).apply {
+            text = cooldownUntilMillis?.let { "Gemini requests are cooling down until ${formatClockTime(it)}. Emergency unlock is still available." }.orEmpty()
+            setTextColor(Color.rgb(252, 211, 77))
+            textSize = 16f
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 24)
+            visibility = if (cooldownUntilMillis == null) View.GONE else View.VISIBLE
+        }
 
         val requestButton = Button(this).apply {
-            text = "Request unlock"
+            text = if (cooldownUntilMillis == null) "Request unlock" else "Gemini on cooldown"
             textSize = 18f
+            isEnabled = cooldownUntilMillis == null
+        }
+        val emergencyButton = Button(this).apply {
+            text = "Emergency unlock (${state.emergencyCoins})"
+            textSize = 18f
+            isEnabled = state.emergencyCoins > 0
+            setOnClickListener { emergencyUnlock(entry) }
         }
         val quitButton = Button(this).apply {
             text = "Quit app"
@@ -136,7 +154,9 @@ class AppLockOverlayService : Service() {
         root.addView(icon, wrapContentParams())
         root.addView(title, matchWrapParams())
         root.addView(status, matchWrapParams())
+        root.addView(cooldown, matchWrapParams())
         root.addView(requestButton, matchWrapParams())
+        root.addView(emergencyButton, matchWrapParams(topMargin = 18))
         root.addView(quitButton, matchWrapParams(topMargin = 18))
         root.addView(decision, matchWrapParams())
 
@@ -164,30 +184,51 @@ class AppLockOverlayService : Service() {
     }
 
     private fun addRequestForm(root: LinearLayout, state: AppLockState, entry: AppLockEntry) {
+        val cooldownUntilMillis = entry.cooldownUntilMillis.takeIf { it > System.currentTimeMillis() }
         val prompt = TextView(this).apply {
-            text = "Ask Gemini for access to ${entry.appName.ifBlank { "this app" }}"
+            text = if (cooldownUntilMillis == null) {
+                "Ask Gemini for access to ${entry.appName.ifBlank { "this app" }}"
+            } else {
+                "Gemini is cooling down"
+            }
             setTextColor(Color.WHITE)
             textSize = 22f
             gravity = Gravity.CENTER
             setTypeface(typeface, android.graphics.Typeface.BOLD)
         }
+        val cooldown = TextView(this).apply {
+            text = cooldownUntilMillis?.let { "You can only use emergency unlock until ${formatClockTime(it)}." }.orEmpty()
+            setTextColor(Color.rgb(252, 211, 77))
+            textSize = 16f
+            gravity = Gravity.CENTER
+            setPadding(0, 18, 0, 0)
+            visibility = if (cooldownUntilMillis == null) View.GONE else View.VISIBLE
+        }
         val apiKeyInput = EditText(this).apply {
             hint = "Gemini API key"
             setSingleLine(true)
             setText(state.geminiApiKey)
-            visibility = if (state.geminiApiKey.isBlank()) View.VISIBLE else View.GONE
+            visibility = if (state.geminiApiKey.isBlank() && cooldownUntilMillis == null) View.VISIBLE else View.GONE
         }
         val messageInput = EditText(this).apply {
             hint = "Message to Gemini"
             minLines = 3
+            visibility = if (cooldownUntilMillis == null) View.VISIBLE else View.GONE
         }
         val tempButton = Button(this).apply {
             text = "Temporary unlock"
+            visibility = if (cooldownUntilMillis == null) View.VISIBLE else View.GONE
             setOnClickListener { submitRequest(entry, apiKeyInput.text.toString(), messageInput.text.toString(), LockAction.Unlock) }
         }
         val removeButton = Button(this).apply {
             text = "Remove lock"
+            visibility = if (cooldownUntilMillis == null) View.VISIBLE else View.GONE
             setOnClickListener { submitRequest(entry, apiKeyInput.text.toString(), messageInput.text.toString(), LockAction.Remove) }
+        }
+        val emergencyButton = Button(this).apply {
+            text = "Emergency unlock (${state.emergencyCoins})"
+            isEnabled = state.emergencyCoins > 0
+            setOnClickListener { emergencyUnlock(entry) }
         }
         val backButton = Button(this).apply {
             text = "Back"
@@ -199,10 +240,12 @@ class AppLockOverlayService : Service() {
         }
 
         root.addView(prompt, matchWrapParams())
+        root.addView(cooldown, matchWrapParams())
         root.addView(apiKeyInput, matchWrapParams(topMargin = 24))
         root.addView(messageInput, matchWrapParams(topMargin = 18))
         root.addView(tempButton, matchWrapParams(topMargin = 18))
         root.addView(removeButton, matchWrapParams(topMargin = 18))
+        root.addView(emergencyButton, matchWrapParams(topMargin = 18))
         root.addView(backButton, matchWrapParams(topMargin = 18))
         root.addView(quitButton, matchWrapParams(topMargin = 18))
     }
@@ -216,6 +259,18 @@ class AppLockOverlayService : Service() {
             val store = PurgeStore(applicationContext)
             if (apiKey.isNotBlank()) store.saveGeminiApiKey(apiKey)
             val state = store.currentLockState()
+            val currentEntry = state.entryForPackage(entry.packageName) ?: entry
+            if (currentEntry.cooldownUntilMillis > System.currentTimeMillis()) {
+                showDecisionResult(
+                    entry = currentEntry,
+                    approved = false,
+                    reason = "Gemini requests are cooling down until ${formatClockTime(currentEntry.cooldownUntilMillis)}. Use emergency unlock if you need access now.",
+                    unlockMinutes = null,
+                    primaryActionLabel = "Back",
+                    onPrimaryAction = { scope.launch { loadAndShowOverlay() } },
+                )
+                return@launch
+            }
             val key = apiKey.ifBlank { state.geminiApiKey }
             if (key.isBlank()) {
                 Toast.makeText(this@AppLockOverlayService, "Save a Gemini API key first.", Toast.LENGTH_LONG).show()
@@ -245,7 +300,7 @@ class AppLockOverlayService : Service() {
                         decision = "Gemini approved ${decision.grantedMinutes} minutes: ${decision.reason}",
                         grantedMinutes = decision.grantedMinutes,
                     )
-                    Notifications.showAppUnlockedNotification(this@AppLockOverlayService, entry.appName, unlockedUntilMillis)
+                    Notifications.showAppUnlockedNotification(this@AppLockOverlayService, entry.packageName, entry.appName, unlockedUntilMillis, decision.grantedMinutes)
                     showDecisionResult(
                         entry = entry,
                         approved = true,
@@ -277,6 +332,28 @@ class AppLockOverlayService : Service() {
                     onPrimaryAction = { scope.launch { loadAndShowOverlay() } },
                 )
             }
+        }
+    }
+
+    private fun emergencyUnlock(entry: AppLockEntry) {
+        scope.launch {
+            val store = PurgeStore(applicationContext)
+            val now = System.currentTimeMillis()
+            if (!store.spendEmergencyCoin(entry.packageName, now)) {
+                Toast.makeText(this@AppLockOverlayService, "No emergency unlocks available.", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val grantedMinutes = 180
+            val unlockedUntilMillis = now + grantedMinutes * 60_000L
+            Notifications.showAppUnlockedNotification(this@AppLockOverlayService, entry.packageName, entry.appName, unlockedUntilMillis, grantedMinutes)
+            showDecisionResult(
+                entry = entry,
+                approved = true,
+                reason = "Emergency unlock spent 1 coin.",
+                unlockMinutes = grantedMinutes,
+                primaryActionLabel = "Open app",
+                onPrimaryAction = { quitLockedApp(removeOnly = true) },
+            )
         }
     }
 
@@ -386,6 +463,10 @@ class AppLockOverlayService : Service() {
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT,
         )
+    }
+
+    private fun formatClockTime(millis: Long): String {
+        return DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(millis))
     }
 
     private fun removeOverlay() {

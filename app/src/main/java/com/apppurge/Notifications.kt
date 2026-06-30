@@ -12,6 +12,8 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import java.text.DateFormat
+import java.util.Date
 
 object Notifications {
     const val CHANNEL_ID = "purge_active"
@@ -71,21 +73,25 @@ object Notifications {
             .build()
     }
 
-    fun appUnlockedNotification(context: Context, appName: String, unlockedUntilMillis: Long): Notification {
-        promotedAppUnlockedNotification(context, appName, unlockedUntilMillis)?.let { return it }
+    fun appUnlockedNotification(context: Context, packageName: String, appName: String, unlockedUntilMillis: Long, grantedMinutes: Int): Notification {
+        promotedAppUnlockedNotification(context, packageName, appName, unlockedUntilMillis, grantedMinutes)?.let { return it }
 
         ensureChannel(context)
-        val pendingIntent = PendingIntent.getActivity(
-            context,
-            3,
-            Intent(context, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
+        val pendingIntent = appPurgePendingIntent(context, packageName)
+        val openAppPendingIntent = openAppPendingIntent(context, packageName)
         val remainingMillis = (unlockedUntilMillis - System.currentTimeMillis()).coerceAtLeast(0L)
+        val untilText = formatClockTime(unlockedUntilMillis)
+        val title = "$appName unlocked"
+        val text = "${formatDuration(remainingMillis)} left, until $untilText"
         return NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("$appName unlocked")
-            .setContentText("Time left: ${formatDuration(remainingMillis)}")
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .bigText("$appName is temporarily unlocked until $untilText. App Purge will lock it again when time runs out."),
+            )
+            .setSubText("App lock")
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -95,27 +101,27 @@ object Notifications {
             .setTimeoutAfter(remainingMillis)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setProgress((grantedMinutes * 60).coerceAtLeast(1), (remainingMillis / 1000L).toInt().coerceAtLeast(0), false)
+            .addAction(android.R.drawable.ic_menu_view, "Open", openAppPendingIntent)
+            .addAction(android.R.drawable.ic_menu_manage, "App Purge", pendingIntent)
             .build()
     }
 
-    private fun promotedAppUnlockedNotification(context: Context, appName: String, unlockedUntilMillis: Long): Notification? {
+    private fun promotedAppUnlockedNotification(context: Context, packageName: String, appName: String, unlockedUntilMillis: Long, grantedMinutes: Int): Notification? {
         if (Build.VERSION.SDK_INT < 36) return null
         return runCatching {
             ensureChannel(context)
-            val pendingIntent = PendingIntent.getActivity(
-                context,
-                3,
-                Intent(context, MainActivity::class.java),
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-            )
+            val pendingIntent = appPurgePendingIntent(context, packageName)
+            val openAppPendingIntent = openAppPendingIntent(context, packageName)
             val now = System.currentTimeMillis()
             val remainingMillis = (unlockedUntilMillis - now).coerceAtLeast(0L)
-            val totalMillis = remainingMillis.coerceAtLeast(1L)
-            val elapsedProgress = 100 - ((remainingMillis * 100L) / totalMillis).toInt().coerceIn(0, 100)
+            val totalMillis = (grantedMinutes.coerceAtLeast(1) * 60_000L)
+            val elapsedProgress = (((totalMillis - remainingMillis).coerceAtLeast(0L) * 100L) / totalMillis).toInt().coerceIn(0, 100)
+            val untilText = formatClockTime(unlockedUntilMillis)
             val builder = Notification.Builder(context, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentTitle("$appName unlocked")
-                .setContentText("Time left: ${formatDuration(remainingMillis)}")
+                .setContentText("${formatDuration(remainingMillis)} left, until $untilText")
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
@@ -124,6 +130,8 @@ object Notifications {
                 .setChronometerCountDown(true)
                 .setTimeoutAfter(remainingMillis)
                 .setCategory(Notification.CATEGORY_STATUS)
+                .addAction(Notification.Action.Builder(android.R.drawable.ic_menu_view, "Open", openAppPendingIntent).build())
+                .addAction(Notification.Action.Builder(android.R.drawable.ic_menu_manage, "App Purge", pendingIntent).build())
 
             builder.javaClass
                 .getMethod("setShortCriticalText", String::class.java)
@@ -149,15 +157,15 @@ object Notifications {
         }.getOrNull()
     }
 
-    fun showAppUnlockedNotification(context: Context, appName: String, unlockedUntilMillis: Long) {
+    fun showAppUnlockedNotification(context: Context, packageName: String, appName: String, unlockedUntilMillis: Long, grantedMinutes: Int) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             return
         }
         NotificationManagerCompat.from(context).notify(
-            APP_LOCK_UNLOCKED_NOTIFICATION_ID,
-            appUnlockedNotification(context, appName, unlockedUntilMillis),
+            appUnlockedNotificationId(packageName),
+            appUnlockedNotification(context, packageName, appName, unlockedUntilMillis, grantedMinutes),
         )
     }
 
@@ -198,5 +206,42 @@ object Notifications {
             hours > 0L -> "${hours}h"
             else -> "${minutes}m"
         }
+    }
+
+    private fun formatClockTime(millis: Long): String {
+        return DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(millis))
+    }
+
+    private fun appUnlockedNotificationId(packageName: String): Int {
+        return APP_LOCK_UNLOCKED_NOTIFICATION_ID + (packageName.hashCode() and 0x0fffffff)
+    }
+
+    private fun appPurgePendingIntent(context: Context, packageName: String): PendingIntent {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(MainActivity.EXTRA_LOCKED_PACKAGE, packageName)
+        }
+        return PendingIntent.getActivity(
+            context,
+            packageName.hashCode(),
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+    }
+
+    private fun openAppPendingIntent(context: Context, packageName: String): PendingIntent {
+        val intent = context.packageManager.getLaunchIntentForPackage(packageName)
+            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            ?: Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(MainActivity.EXTRA_SHOW_LOCK_GATE, true)
+                putExtra(MainActivity.EXTRA_LOCKED_PACKAGE, packageName)
+            }
+        return PendingIntent.getActivity(
+            context,
+            packageName.hashCode() + 100_000,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
     }
 }

@@ -45,6 +45,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -148,6 +149,7 @@ private fun AppPurgeApp() {
     var currentPage by remember { mutableStateOf(if (activity?.intent?.getBooleanExtra(MainActivity.EXTRA_SHOW_LOCK_GATE, false) == true) AppPage.LockGate else AppPage.Home) }
     var appListMode by remember { mutableStateOf(AppListMode.All) }
     var lockRequestResult by remember { mutableStateOf<AppLockRequestResult?>(null) }
+    var appActionResult by remember { mutableStateOf<AppLockRequestResult?>(null) }
 
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -270,10 +272,12 @@ private fun AppPurgeApp() {
         } else if (selectedApp == null) {
             AppsScreen(
                 modifier = Modifier.padding(padding),
-                apps = appsForMode(apps, appListMode),
+                apps = appsForMode(apps, appListMode, currentLockState),
                 title = appListMode.title,
                 emptyMessage = appListMode.emptyMessage,
+                mode = appListMode,
                 onBack = { currentPage = AppPage.Home },
+                onModeChange = { appListMode = it },
                 lockState = currentLockState,
                 onSelectApp = {
                     selectedApp = it
@@ -281,8 +285,7 @@ private fun AppPurgeApp() {
                 },
                 onToggleLock = { app, isLocked ->
                     scope.launch {
-                        if (isLocked) store.disableAppLock(app.packageName, "Lock removed for ${app.label}.")
-                        else store.enableAppLock(app.packageName, app.label)
+                        if (!isLocked) store.enableAppLock(app.packageName, app.label)
                     }
                 },
                 onEmergencyUnlock = { app ->
@@ -291,8 +294,10 @@ private fun AppPurgeApp() {
                         if (store.spendEmergencyCoin(app.packageName, now)) {
                             Notifications.showAppUnlockedNotification(
                                 context.applicationContext,
+                                app.packageName,
                                 app.label,
                                 now + 3L * 60L * 60L * 1000L,
+                                180,
                             )
                         }
                     }
@@ -306,11 +311,14 @@ private fun AppPurgeApp() {
                 app = app,
                 config = config,
                 lockEntry = lockEntry,
+                geminiApiKey = currentLockState?.geminiApiKey.orEmpty(),
                 emergencyCoins = currentLockState?.emergencyCoins ?: 0,
+                lastDecision = currentLockState?.lastDecision.orEmpty(),
                 onBack = {
                     selectedApp = null
                     configuringSelectedApp = false
                 },
+                onSaveApiKey = { apiKey -> scope.launch { store.saveGeminiApiKey(apiKey) } },
                 onConfigurePurge = { configuringSelectedApp = true },
                 onCancelPurge = {
                     scope.launch {
@@ -320,8 +328,68 @@ private fun AppPurgeApp() {
                 },
                 onToggleLock = {
                     scope.launch {
-                        if (lockEntry != null) store.disableAppLock(app.packageName, "Lock removed for ${app.label}.")
-                        else store.enableAppLock(app.packageName, app.label)
+                        if (lockEntry == null) store.enableAppLock(app.packageName, app.label)
+                    }
+                },
+                onRequestRemoveLock = { reason ->
+                    scope.launch(Dispatchers.IO) {
+                        val state = store.currentLockState()
+                        val entry = state.entryForPackage(app.packageName) ?: return@launch
+                        val now = System.currentTimeMillis()
+                        if (entry.cooldownUntilMillis > now) {
+                            withContext(Dispatchers.Main) {
+                                appActionResult = AppLockRequestResult(
+                                    approved = false,
+                                    appName = entry.appName,
+                                    reason = "Gemini requests are cooling down until ${formatMillis(entry.cooldownUntilMillis, DateTimeFormatter.ofPattern("MMM d h:mm a"))}. Use emergency unlock if you need access now.",
+                                    unlockMinutes = null,
+                                    closeOnDismiss = false,
+                                )
+                            }
+                            return@launch
+                        }
+                        val key = state.geminiApiKey
+                        if (key.isBlank()) {
+                            withContext(Dispatchers.Main) {
+                                appActionResult = AppLockRequestResult(
+                                    approved = false,
+                                    appName = entry.appName,
+                                    reason = "Save a Gemini API key before requesting lock removal.",
+                                    unlockMinutes = null,
+                                    closeOnDismiss = false,
+                                )
+                            }
+                            return@launch
+                        }
+                        try {
+                            val decision = GeminiLockClient.evaluate(key, entry.appName, entry.reason, reason, LockAction.Remove)
+                            if (decision.approved) {
+                                store.disableAppLock(entry.packageName, "Gemini approved removing the lock: ${decision.reason}")
+                            } else {
+                                store.denyLockRequest(entry.packageName, now + decision.cooldownMinutes * 60_000L, "Gemini denied remove-lock request: ${decision.reason}")
+                            }
+                            withContext(Dispatchers.Main) {
+                                appActionResult = AppLockRequestResult(
+                                    approved = decision.approved,
+                                    appName = entry.appName,
+                                    reason = decision.reason,
+                                    unlockMinutes = null,
+                                    closeOnDismiss = false,
+                                )
+                            }
+                        } catch (error: Exception) {
+                            val message = error.message ?: "Unknown error"
+                            store.denyLockRequest(entry.packageName, System.currentTimeMillis() + 10L * 60_000L, "Gemini request failed: $message")
+                            withContext(Dispatchers.Main) {
+                                appActionResult = AppLockRequestResult(
+                                    approved = false,
+                                    appName = entry.appName,
+                                    reason = "Gemini request failed: $message",
+                                    unlockMinutes = null,
+                                    closeOnDismiss = false,
+                                )
+                            }
+                        }
                     }
                 },
                 onEmergencyUnlock = {
@@ -330,8 +398,10 @@ private fun AppPurgeApp() {
                         if (store.spendEmergencyCoin(app.packageName, now)) {
                             Notifications.showAppUnlockedNotification(
                                 context.applicationContext,
+                                app.packageName,
                                 app.label,
                                 now + 3L * 60L * 60L * 1000L,
+                                180,
                             )
                         }
                     }
@@ -376,13 +446,56 @@ private fun AppPurgeApp() {
                     lockRequestResult = null
                 }
             },
+            onEmergencyUnlock = {
+                scope.launch {
+                    val now = System.currentTimeMillis()
+                    if (store.spendEmergencyCoin(activeLockEntry.packageName, now)) {
+                        val grantedMinutes = 180
+                        val unlockedUntilMillis = now + grantedMinutes * 60_000L
+                        Notifications.showAppUnlockedNotification(
+                            context.applicationContext,
+                            activeLockEntry.packageName,
+                            activeLockEntry.appName,
+                            unlockedUntilMillis,
+                            grantedMinutes,
+                        )
+                        lockRequestResult = AppLockRequestResult(
+                            approved = true,
+                            appName = activeLockEntry.appName,
+                            reason = "Emergency unlock spent 1 coin.",
+                            unlockMinutes = grantedMinutes,
+                            closeOnDismiss = true,
+                        )
+                    } else {
+                        lockRequestResult = AppLockRequestResult(
+                            approved = false,
+                            appName = activeLockEntry.appName,
+                            reason = "No emergency unlocks are available.",
+                            unlockMinutes = null,
+                            closeOnDismiss = false,
+                        )
+                    }
+                }
+            },
             onRequest = { action, reason ->
                 scope.launch(Dispatchers.IO) {
                     try {
                         val state = store.currentLockState()
                         val entry = state.entryForPackage(activeLockEntry.packageName) ?: return@launch
-                        val decision = GeminiLockClient.evaluate(state.geminiApiKey, entry.appName, entry.reason, reason, action)
                         val now = System.currentTimeMillis()
+                        if (entry.cooldownUntilMillis > now) {
+                            withContext(Dispatchers.Main) {
+                                lockRequestResult = AppLockRequestResult(
+                                    approved = false,
+                                    appName = entry.appName,
+                                    reason = "Gemini requests are cooling down until ${formatMillis(entry.cooldownUntilMillis, DateTimeFormatter.ofPattern("MMM d h:mm a"))}. Use emergency unlock if you need access now.",
+                                    unlockMinutes = null,
+                                    closeOnDismiss = false,
+                                )
+                            }
+                            return@launch
+                        }
+                        val decision = GeminiLockClient.evaluate(state.geminiApiKey, entry.appName, entry.reason, reason, action)
                         if (decision.approved && action == LockAction.Remove) {
                             store.disableAppLock(entry.packageName, "Gemini approved removing the lock: ${decision.reason}")
                             withContext(Dispatchers.Main) {
@@ -403,7 +516,7 @@ private fun AppPurgeApp() {
                                 decision = "Gemini approved ${decision.grantedMinutes} minutes: ${decision.reason}",
                                 grantedMinutes = decision.grantedMinutes,
                             )
-                            Notifications.showAppUnlockedNotification(context.applicationContext, entry.appName, unlockedUntilMillis)
+                            Notifications.showAppUnlockedNotification(context.applicationContext, entry.packageName, entry.appName, unlockedUntilMillis, decision.grantedMinutes)
                             withContext(Dispatchers.Main) {
                                 lockRequestResult = AppLockRequestResult(
                                     approved = true,
@@ -442,6 +555,24 @@ private fun AppPurgeApp() {
             },
         )
     }
+
+    appActionResult?.let { result ->
+        AlertDialog(
+            onDismissRequest = { appActionResult = null },
+            confirmButton = {
+                Button(onClick = { appActionResult = null }) {
+                    Text("Done")
+                }
+            },
+            title = { Text(if (result.approved) "Approved" else "Denied") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(result.appName.ifBlank { "App" }, style = MaterialTheme.typography.titleMedium)
+                    Text(result.reason, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            },
+        )
+    }
 }
 
 private enum class AppPage { Home, Apps, Settings, LockGate }
@@ -457,14 +588,22 @@ private data class AppLockRequestResult(
 private enum class AppListMode(
     val title: String,
     val emptyMessage: String,
+    val filterLabel: String,
 ) {
     All(
         title = "All apps",
         emptyMessage = "No apps found.",
+        filterLabel = "All",
     ),
     NewThisWeek(
         title = "New apps this week",
         emptyMessage = "No apps were installed in the last week.",
+        filterLabel = "New",
+    ),
+    Locked(
+        title = "Locked apps",
+        emptyMessage = "No locked apps.",
+        filterLabel = "Locked",
     ),
 }
 
@@ -475,10 +614,11 @@ private fun appsInstalledThisWeek(apps: List<InstalledApp>): List<InstalledApp> 
         .sortedByDescending { it.firstInstallTimeMillis }
 }
 
-private fun appsForMode(apps: List<InstalledApp>, mode: AppListMode): List<InstalledApp> {
+private fun appsForMode(apps: List<InstalledApp>, mode: AppListMode, lockState: AppLockState?): List<InstalledApp> {
     return when (mode) {
         AppListMode.All -> apps
         AppListMode.NewThisWeek -> appsInstalledThisWeek(apps).take(5)
+        AppListMode.Locked -> apps.filter { app -> lockState?.entryForPackage(app.packageName) != null }
     }
 }
 
@@ -615,8 +755,10 @@ private fun AppsScreen(
     apps: List<InstalledApp>,
     title: String,
     emptyMessage: String,
+    mode: AppListMode,
     lockState: AppLockState?,
     onBack: () -> Unit,
+    onModeChange: (AppListMode) -> Unit,
     onSelectApp: (InstalledApp) -> Unit,
     onToggleLock: (InstalledApp, Boolean) -> Unit,
     onEmergencyUnlock: (InstalledApp) -> Unit,
@@ -643,6 +785,17 @@ private fun AppsScreen(
                     Icon(Icons.Filled.ArrowBack, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Home")
+                }
+            }
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AppListMode.entries.forEach { option ->
+                    FilterChip(
+                        selected = mode == option,
+                        onClick = { onModeChange(option) },
+                        label = { Text(option.filterLabel) },
+                    )
                 }
             }
         }
@@ -693,6 +846,7 @@ private fun AppRow(
         ),
     ) {
         val iconBitmap = remember(app.packageName) { app.icon.toBitmap(width = 96, height = 96).asImageBitmap() }
+        val isCoolingDown = lockEntry?.cooldownUntilMillis?.let { it > System.currentTimeMillis() } == true
         ListItem(
             headlineContent = { Text(app.label) },
             supportingContent = {
@@ -705,7 +859,11 @@ private fun AppRow(
             trailingContent = {
                 Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     AssistChip(onClick = onClick, label = { Text("Purge") })
-                    AssistChip(onClick = onToggleLock, label = { Text(if (lockEntry == null) "Lock" else "Unlock") })
+                    if (lockEntry == null) {
+                        AssistChip(onClick = onToggleLock, label = { Text("Lock") })
+                    } else {
+                        AssistChip(onClick = onClick, label = { Text(if (isCoolingDown) "Cooldown" else "Details") })
+                    }
                     if (lockEntry != null) {
                         AssistChip(
                             onClick = onEmergencyUnlock,
@@ -726,14 +884,21 @@ private fun AppDetailsScreen(
     app: InstalledApp,
     config: PurgeConfig?,
     lockEntry: com.apppurge.data.AppLockEntry?,
+    geminiApiKey: String,
     emergencyCoins: Int,
+    lastDecision: String,
     onBack: () -> Unit,
+    onSaveApiKey: (String) -> Unit,
     onConfigurePurge: () -> Unit,
     onCancelPurge: () -> Unit,
     onToggleLock: () -> Unit,
+    onRequestRemoveLock: (String) -> Unit,
     onEmergencyUnlock: () -> Unit,
 ) {
     val formatter = remember { DateTimeFormatter.ofPattern("MMM d, yyyy h:mm a") }
+    var showRemoveLockRequest by remember { mutableStateOf(false) }
+    var removeReason by remember { mutableStateOf("") }
+    var apiKey by remember(geminiApiKey) { mutableStateOf(geminiApiKey) }
     val now = System.currentTimeMillis()
     val appIcon = remember(app.packageName) { app.icon.toBitmap(width = 128, height = 128).asImageBitmap() }
     val installedAt = remember(app.firstInstallTimeMillis) {
@@ -824,8 +989,18 @@ private fun AppDetailsScreen(
                     }
                     StatusLine("Emergency coins", emergencyCoins.toString())
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Button(onClick = onToggleLock, modifier = Modifier.weight(1f)) {
-                            Text(if (lockEntry == null) "Lock app" else "Remove lock")
+                        if (lockEntry == null) {
+                            Button(onClick = onToggleLock, modifier = Modifier.weight(1f)) {
+                                Text("Lock app")
+                            }
+                        } else {
+                            Button(
+                                onClick = { showRemoveLockRequest = true },
+                                enabled = lockEntry.cooldownUntilMillis <= now,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text(if (lockEntry.cooldownUntilMillis > now) "On cooldown" else "Request removal")
+                            }
                         }
                         if (lockEntry != null) {
                             OutlinedButton(
@@ -836,6 +1011,9 @@ private fun AppDetailsScreen(
                                 Text("Emergency")
                             }
                         }
+                    }
+                    lastDecision.takeIf { it.isNotBlank() }?.let {
+                        Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -849,6 +1027,55 @@ private fun AppDetailsScreen(
             }
         }
         item { Spacer(Modifier.height(24.dp)) }
+    }
+
+    if (showRemoveLockRequest && lockEntry != null) {
+        AlertDialog(
+            onDismissRequest = { showRemoveLockRequest = false },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onRequestRemoveLock(removeReason)
+                        showRemoveLockRequest = false
+                        removeReason = ""
+                    },
+                    enabled = geminiApiKey.isNotBlank() && removeReason.isNotBlank(),
+                ) {
+                    Text("Ask Gemini")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRemoveLockRequest = false }) {
+                    Text("Cancel")
+                }
+            },
+            title = { Text("Request lock removal") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(lockEntry.appName.ifBlank { "App" }, style = MaterialTheme.typography.titleMedium)
+                    Text("Gemini must approve removing this lock.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (geminiApiKey.isBlank()) {
+                        OutlinedTextField(
+                            value = apiKey,
+                            onValueChange = { apiKey = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Gemini API key") },
+                            singleLine = true,
+                        )
+                        Button(onClick = { onSaveApiKey(apiKey) }, modifier = Modifier.fillMaxWidth()) {
+                            Text("Save API key")
+                        }
+                    }
+                    OutlinedTextField(
+                        value = removeReason,
+                        onValueChange = { removeReason = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Why should this lock be removed?") },
+                        minLines = 3,
+                    )
+                }
+            },
+        )
     }
 }
 
@@ -1227,6 +1454,7 @@ private fun LockPopup(
     onSaveApiKey: (String) -> Unit,
     onDismiss: () -> Unit,
     onResultDismiss: () -> Unit,
+    onEmergencyUnlock: () -> Unit,
     onRequest: (LockAction, String) -> Unit,
 ) {
     var apiKey by remember(lockState.geminiApiKey) { mutableStateOf(lockState.geminiApiKey) }
@@ -1263,10 +1491,15 @@ private fun LockPopup(
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
-            if (showRequest) {
+            if (cooldown != null) {
+                Button(
+                    onClick = onEmergencyUnlock,
+                    enabled = lockState.emergencyCoins > 0,
+                ) { Text("Emergency unlock") }
+            } else if (showRequest) {
                 Button(
                     onClick = { onRequest(action, reason) },
-                    enabled = lockState.geminiApiKey.isNotBlank() && reason.isNotBlank() && cooldown == null,
+                    enabled = lockState.geminiApiKey.isNotBlank() && reason.isNotBlank(),
                 ) { Text("Ask Gemini") }
             } else {
                 Button(onClick = { showRequest = true }) { Text("Request unlock") }
@@ -1290,8 +1523,11 @@ private fun LockPopup(
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (!showRequest) {
-                    Text("Use Request unlock to ask Gemini for temporary access. Emergency unlocks are only available from the Apps page inside App Purge.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (cooldown != null) {
+                    Text("Gemini requests are cooling down until $cooldown.", color = MaterialTheme.colorScheme.error)
+                    Text("Only emergency unlock can open this app right now. Emergency coins: ${lockState.emergencyCoins}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else if (!showRequest) {
+                    Text("Use Request unlock to ask Gemini for temporary access, or use emergency unlock from the app details screen.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
                     if (lockState.geminiApiKey.isBlank()) {
                         OutlinedTextField(
@@ -1316,7 +1552,6 @@ private fun LockPopup(
                         AssistChip(onClick = { action = LockAction.Unlock }, label = { Text("Temporary unlock") })
                         AssistChip(onClick = { action = LockAction.Remove }, label = { Text("Remove lock") })
                     }
-                    cooldown?.let { Text("Cooldown until $it", color = MaterialTheme.colorScheme.error) }
                     lockState.lastDecision.takeIf { it.isNotBlank() }?.let {
                         Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }

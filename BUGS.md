@@ -1,42 +1,28 @@
 # UX Bugs
 
-## High priority
+## Completed or Mitigated
 
 ### Existing installs signed with old debug keys cannot migrate to the new release key
 
-- Where: `app/build.gradle.kts` release signing and `.github/workflows/build-and-release.yml`.
-- What the user sees: Android may refuse to update an installed app that was signed by an older debug or CI-generated key, so the user has to uninstall and reinstall, losing App Purge data.
-- Why this is a bug: Android will not install an update over an app signed by a different certificate. Stable release signing fixes future releases, but it cannot retroactively migrate installs signed with a different private key.
-- Evidence: the package id is stable (`com.apppurge`) and the current local APK reports versionCode `9`, but its debug signing cert SHA-256 is `0081f46fd5a8be83fcc8c72d082898500913678b341b7159394a00ca46968a52`. A release built on another machine/runner can have a different debug cert.
-- Expected behavior: warn users that one final reinstall may be required when moving from the old debug-signed builds to the stable release key, then keep all future releases signed with the stable key.
+- Status: Mitigated for future releases; impossible to fully fix for existing debug-key installs.
+- Notes: Android will not update across signing certificates. Stable release signing is configured now, but installs signed by old debug or random CI keys still need one final reinstall.
 
 ### Apps list can remove a lock without Gemini review
 
-- Where: `MainActivity.kt`, app row `Unlock` chip.
-- What the user sees: a locked app can be unlocked directly from the Apps list with one tap.
-- Why this is a bug: the lock model teaches users that removing or bypassing a lock should go through Gemini or an emergency unlock, but this chip removes the lock immediately.
-- Expected behavior: direct removal should require confirmation at minimum, and probably use the same Gemini remove-lock flow as the overlay.
+- Status: Fixed.
+- Notes: Locked rows no longer expose a direct unlock/remove action. The row sends users to details instead.
 
 ### App details can remove a lock without Gemini review
 
-- Where: `MainActivity.kt`, app details `Remove lock` button.
-- What the user sees: opening an app's info page and tapping `Remove lock` deletes the lock immediately.
-- Why this is a bug: this bypasses the stricter Gemini remove-lock policy used when a locked app is opened.
-- Expected behavior: the details screen should request Gemini approval, or clearly label this as an admin override with confirmation.
+- Status: Fixed.
+- Notes: App details now uses a Gemini remove-lock request dialog instead of deleting the lock directly.
 
 ### There is no dedicated Locked Apps view
 
-- Where: Home, Apps, and Settings screens.
-- What the user sees: Settings shows a text list of locked app names, but there is no way to tap into a filtered list of locked apps.
-- Why this is a bug: after locking several apps, users have to hunt through All apps to inspect or manage them.
-- Expected behavior: add a `Locked apps` entry point from Home or Settings that opens a filtered apps list.
+- Status: Partially fixed.
+- Notes: The Apps page now has a `Locked` filter. A dedicated Home/Settings entry point is still not implemented.
 
-### Cooldown is not enforced in the overlay unlock form
-
-- Where: `AppLockOverlayService.kt`, request form.
-- What the user sees: after Gemini denies a request and applies a cooldown, the overlay still offers `Temporary unlock` and `Remove lock` buttons.
-- Why this is a bug: users can keep submitting requests from the overlay even while the in-app fallback disables `Ask Gemini` during cooldown.
-- Expected behavior: overlay should show the cooldown time and disable Gemini request actions until it expires.
+## High priority
 
 ### Overlay permission notification sends users to the wrong context
 
@@ -82,26 +68,12 @@
 - Why this is a bug: emergency coins are limited, and the UI does not confirm the spend or show the resulting unlock duration.
 - Expected behavior: show a confirmation first, then a result message with remaining coins and unlock expiration.
 
-### Emergency unlock is hidden from the lock overlay
-
-- Where: `AppLockOverlayService.kt`.
-- What the user sees: when blocked by a locked app, the overlay only offers Gemini request and quit.
-- Why this is a bug: users may have emergency coins but cannot spend them at the moment they need access.
-- Expected behavior: show emergency unlock in the overlay, with confirmation and coin count.
-
 ### Unlock notification may outlive the actual lock state
 
 - Where: `Notifications.kt` and lock state updates.
 - What the user sees: an ongoing "app unlocked" notification can remain even if the lock is removed, another unlock replaces it, or the app is relocked manually.
 - Why this is a bug: the notification can claim an app is unlocked when that is no longer true.
 - Expected behavior: cancel or update the unlocked notification whenever lock state changes.
-
-### Live notification progress is effectively static
-
-- Where: `Notifications.kt`, promoted unlocked notification path.
-- What the user sees: on devices that support live notifications, the countdown text updates via chronometer, but the promoted progress value is calculated from the remaining time as if the current remaining time were the full duration.
-- Why this is a bug: the live progress indicator may appear wrong or not useful.
-- Expected behavior: store/pass the original unlock duration and calculate progress from elapsed time over total granted time.
 
 ### Locked state in the Apps list does not distinguish temporarily unlocked apps
 

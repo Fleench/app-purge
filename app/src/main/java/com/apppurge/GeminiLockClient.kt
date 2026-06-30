@@ -19,10 +19,12 @@ object GeminiLockClient {
             Their stated reason is: "$requestReason".
 
             Decide if this request is consistent with the original lock intent.
-            Temporary unlock requests should be lenient: approve ordinary specific reasons and grant between 5 and 180 minutes based on need.
+            Temporary unlock requests should be strict. Approve only when the reason is specific, necessary, time-bounded, and consistent with the lock intent.
+            Deny vague, boredom, habit, entertainment, scrolling, procrastination, "just checking", or weak convenience reasons.
+            For approved temporary unlocks, grant the shortest practical time between 5 and 60 minutes. Prefer 5-15 minutes unless a clear task needs more.
             Permanent remove-lock requests should be very strict and usually denied unless the reason clearly shows the lock is permanently no longer needed.
-            Always set a cooldown in minutes before another request.
-            Return only JSON with keys: approved (boolean), granted_minutes (integer 0-180), cooldown_minutes (integer 0-1440), reason (string).
+            Always set a cooldown in minutes before another Gemini request. Denials should normally cool down for at least 120 minutes.
+            Return only JSON with keys: approved (boolean), granted_minutes (integer 0-60), cooldown_minutes (integer 0-1440), reason (string).
         """.trimIndent()
 
         val request = JSONObject()
@@ -67,10 +69,20 @@ object GeminiLockClient {
             .getJSONObject(0)
             .getString("text")
         val json = JSONObject(text)
+        val approved = json.optBoolean("approved", false)
+        val grantedMinutes = json.optDouble("granted_minutes", 0.0).roundToInt()
+        val cooldownMinutes = json.optDouble("cooldown_minutes", 120.0).roundToInt()
         return LockDecision(
-            approved = json.optBoolean("approved", false),
-            grantedMinutes = json.optDouble("granted_minutes", 0.0).roundToInt().coerceIn(0, 180),
-            cooldownMinutes = json.optDouble("cooldown_minutes", 60.0).roundToInt().coerceIn(0, 1440),
+            approved = approved,
+            grantedMinutes = when {
+                !approved -> 0
+                action == LockAction.Unlock -> grantedMinutes.coerceIn(5, 60)
+                else -> 0
+            },
+            cooldownMinutes = when {
+                approved -> cooldownMinutes.coerceAtLeast(15)
+                else -> cooldownMinutes.coerceAtLeast(120)
+            }.coerceIn(0, 1440),
             reason = json.optString("reason", "Gemini returned no reason."),
         )
     }
