@@ -2,6 +2,7 @@ package com.apppurge.data
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -226,7 +227,7 @@ class PurgeStore(private val context: Context) {
         return array.toString()
     }
 
-    private fun writeLegacyCurrentConfig(preferences: Preferences, config: PurgeConfig?) {
+    private fun writeLegacyCurrentConfig(preferences: MutablePreferences, config: PurgeConfig?) {
         if (config == null) {
             preferences.remove(Keys.PackageName)
             preferences.remove(Keys.AppName)
