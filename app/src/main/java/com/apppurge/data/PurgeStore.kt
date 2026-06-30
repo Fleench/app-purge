@@ -73,7 +73,7 @@ class PurgeStore(private val context: Context) {
         }
     }
 
-    suspend fun enableAppLock(packageName: String, appName: String, reason: String) {
+    suspend fun enableAppLock(packageName: String, appName: String, reason: String = "") {
         context.purgeDataStore.edit { preferences ->
             val entries = lockStateFromPreferences(preferences).locks
                 .filterNot { it.packageName == packageName } + AppLockEntry(

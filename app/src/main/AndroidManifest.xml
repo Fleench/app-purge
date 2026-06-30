@@ -72,6 +72,15 @@
                 android:value="Shows the active purge prompt selected by the user." />
         </service>
 
+        <service
+            android:name=".AppLockOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Shows the selected app lock overlay prompt." />
+        </service>
+
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"

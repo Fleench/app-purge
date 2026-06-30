@@ -17,6 +17,7 @@ object Notifications {
     const val CHANNEL_ID = "purge_active"
     const val OVERLAY_NOTIFICATION_ID = 2001
     const val PERMISSION_NOTIFICATION_ID = 2002
+    const val APP_LOCK_NOTIFICATION_ID = 2003
 
     fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -47,6 +48,25 @@ object Notifications {
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .build()
+    }
+
+    fun activeAppLockNotification(context: Context, appName: String): Notification {
+        ensureChannel(context)
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            2,
+            Intent(context, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        return NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentTitle("$appName is locked")
+            .setContentText("Use the overlay to request an unlock or quit the app.")
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
             .build()
     }
 
