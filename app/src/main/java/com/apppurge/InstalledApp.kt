@@ -6,4 +6,5 @@ data class InstalledApp(
     val packageName: String,
     val label: String,
     val icon: Drawable,
+    val firstInstallTimeMillis: Long,
 )
