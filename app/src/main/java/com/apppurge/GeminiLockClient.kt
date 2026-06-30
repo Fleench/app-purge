@@ -10,15 +10,18 @@ object GeminiLockClient {
     private const val Endpoint =
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
-    fun evaluate(apiKey: String, lockReason: String, requestReason: String, action: LockAction): LockDecision {
+    fun evaluate(apiKey: String, lockedAppName: String, lockReason: String, requestReason: String, action: LockAction): LockDecision {
         val prompt = """
-            You are authorizing an app self-control lock. The user's original lock reason is: "$lockReason".
+            You are authorizing access to an individually locked app, not to App Purge itself.
+            The locked app is: "$lockedAppName".
+            The user's original lock reason is: "$lockReason".
             The user now requests: ${action.label}.
             Their stated reason is: "$requestReason".
 
-            Decide if this request is consistent with the original lock intent. Be strict but reasonable.
-            For unlock requests, you may approve up to 180 minutes (3 hours) and set a cooldown in minutes before another request.
-            For remove-lock requests, approve only if the reason shows the lock is no longer needed.
+            Decide if this request is consistent with the original lock intent.
+            Temporary unlock requests should be lenient: approve ordinary specific reasons and grant between 5 and 180 minutes based on need.
+            Permanent remove-lock requests should be very strict and usually denied unless the reason clearly shows the lock is permanently no longer needed.
+            Always set a cooldown in minutes before another request.
             Return only JSON with keys: approved (boolean), granted_minutes (integer 0-180), cooldown_minutes (integer 0-1440), reason (string).
         """.trimIndent()
 

@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">App Purge</string>
     <string name="shizuku_provider_authorities">com.apppurge.shizuku</string>
+    <string name="app_lock_accessibility_description">Detects when a selected app opens so App Purge can show its AI unlock screen.</string>
 </resources>
