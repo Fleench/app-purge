@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.IOException
 
 private val Context.purgeDataStore: DataStore<Preferences> by preferencesDataStore("purge_config")
@@ -28,10 +30,15 @@ class PurgeStore(private val context: Context) {
         val GeminiApiKey = stringPreferencesKey("gemini_api_key")
         val AppLockEnabled = booleanPreferencesKey("app_lock_enabled")
         val AppLockReason = stringPreferencesKey("app_lock_reason")
+        val AppLockPackageName = stringPreferencesKey("app_lock_package_name")
+        val AppLockAppName = stringPreferencesKey("app_lock_app_name")
         val AppLockUnlockedUntil = longPreferencesKey("app_lock_unlocked_until")
         val AppLockCooldownUntil = longPreferencesKey("app_lock_cooldown_until")
+        val AppLockEntries = stringPreferencesKey("app_lock_entries")
         val AppLockLastDecision = stringPreferencesKey("app_lock_last_decision")
         val AppLockLastGrantedMinutes = intPreferencesKey("app_lock_last_granted_minutes")
+        val EmergencyCoins = intPreferencesKey("app_lock_emergency_coins")
+        val LastCoinEarnedDay = longPreferencesKey("app_lock_last_coin_earned_day")
     }
 
     val preferences: Flow<Preferences> = context.purgeDataStore.data
@@ -40,17 +47,7 @@ class PurgeStore(private val context: Context) {
         }
 
     val lockState: Flow<AppLockState> = preferences
-        .map { preferences ->
-            AppLockState(
-                geminiApiKey = preferences[Keys.GeminiApiKey].orEmpty(),
-                enabled = preferences[Keys.AppLockEnabled] ?: false,
-                reason = preferences[Keys.AppLockReason].orEmpty(),
-                unlockedUntilMillis = preferences[Keys.AppLockUnlockedUntil] ?: 0L,
-                cooldownUntilMillis = preferences[Keys.AppLockCooldownUntil] ?: 0L,
-                lastDecision = preferences[Keys.AppLockLastDecision].orEmpty(),
-                lastGrantedMinutes = preferences[Keys.AppLockLastGrantedMinutes] ?: 0,
-            )
-        }
+        .map { preferences -> lockStateFromPreferences(preferences) }
 
     val config: Flow<PurgeConfig?> = preferences
         .map { preferences ->
@@ -76,42 +73,82 @@ class PurgeStore(private val context: Context) {
         }
     }
 
-    suspend fun enableAppLock(reason: String) {
+    suspend fun enableAppLock(packageName: String, appName: String, reason: String) {
         context.purgeDataStore.edit { preferences ->
-            preferences[Keys.AppLockEnabled] = true
-            preferences[Keys.AppLockReason] = reason.trim()
-            preferences[Keys.AppLockUnlockedUntil] = 0L
-            preferences[Keys.AppLockCooldownUntil] = 0L
-            preferences[Keys.AppLockLastDecision] = "Lock enabled."
+            val entries = lockStateFromPreferences(preferences).locks
+                .filterNot { it.packageName == packageName } + AppLockEntry(
+                packageName = packageName,
+                appName = appName,
+                reason = reason.trim(),
+                unlockedUntilMillis = 0L,
+                cooldownUntilMillis = 0L,
+            )
+            preferences[Keys.AppLockEntries] = encodeLockEntries(entries)
+            preferences[Keys.AppLockEnabled] = entries.isNotEmpty()
+            preferences[Keys.AppLockLastDecision] = "Lock enabled for $appName."
             preferences[Keys.AppLockLastGrantedMinutes] = 0
         }
     }
 
-    suspend fun applyUnlockDecision(unlockedUntilMillis: Long, cooldownUntilMillis: Long, decision: String, grantedMinutes: Int) {
-        context.purgeDataStore.edit { preferences ->
-            preferences[Keys.AppLockUnlockedUntil] = unlockedUntilMillis
-            preferences[Keys.AppLockCooldownUntil] = cooldownUntilMillis
-            preferences[Keys.AppLockLastDecision] = decision
-            preferences[Keys.AppLockLastGrantedMinutes] = grantedMinutes
+    suspend fun applyUnlockDecision(packageName: String, unlockedUntilMillis: Long, cooldownUntilMillis: Long, decision: String, grantedMinutes: Int) {
+        updateLock(packageName, decision, grantedMinutes) { entry ->
+            entry.copy(unlockedUntilMillis = unlockedUntilMillis, cooldownUntilMillis = cooldownUntilMillis)
         }
     }
 
-    suspend fun denyLockRequest(cooldownUntilMillis: Long, decision: String) {
-        context.purgeDataStore.edit { preferences ->
-            preferences[Keys.AppLockCooldownUntil] = cooldownUntilMillis
-            preferences[Keys.AppLockLastDecision] = decision
-            preferences[Keys.AppLockLastGrantedMinutes] = 0
+    suspend fun denyLockRequest(packageName: String, cooldownUntilMillis: Long, decision: String) {
+        updateLock(packageName, decision, 0) { entry ->
+            entry.copy(cooldownUntilMillis = cooldownUntilMillis)
         }
     }
 
-    suspend fun disableAppLock(decision: String) {
+    suspend fun spendEmergencyCoin(packageName: String, nowMillis: Long = System.currentTimeMillis()): Boolean {
+        var spent = false
         context.purgeDataStore.edit { preferences ->
-            preferences[Keys.AppLockEnabled] = false
-            preferences[Keys.AppLockReason] = ""
-            preferences[Keys.AppLockUnlockedUntil] = 0L
-            preferences[Keys.AppLockCooldownUntil] = 0L
+            val state = lockStateFromPreferences(preferences).withEarnedCoins(nowMillis)
+            if (state.emergencyCoins <= 0) return@edit
+            val entries = state.locks.map { entry ->
+                if (entry.packageName == packageName) {
+                    entry.copy(
+                        unlockedUntilMillis = nowMillis + 3L * 60L * 60L * 1000L,
+                        cooldownUntilMillis = nowMillis + 3L * 60L * 60L * 1000L,
+                    )
+                } else {
+                    entry
+                }
+            }
+            preferences[Keys.AppLockEntries] = encodeLockEntries(entries)
+            preferences[Keys.EmergencyCoins] = state.emergencyCoins - 1
+            preferences[Keys.LastCoinEarnedDay] = state.lastCoinEarnedDay
+            preferences[Keys.AppLockLastDecision] = "Emergency unlock spent 1 coin for 3 hours."
+            preferences[Keys.AppLockLastGrantedMinutes] = 180
+            spent = true
+        }
+        return spent
+    }
+
+    suspend fun disableAppLock(packageName: String, decision: String) {
+        context.purgeDataStore.edit { preferences ->
+            val entries = lockStateFromPreferences(preferences).locks.filterNot { it.packageName == packageName }
+            preferences[Keys.AppLockEntries] = encodeLockEntries(entries)
+            preferences[Keys.AppLockEnabled] = entries.isNotEmpty()
             preferences[Keys.AppLockLastDecision] = decision
             preferences[Keys.AppLockLastGrantedMinutes] = 0
+            if (entries.isEmpty()) {
+                preferences[Keys.AppLockReason] = ""
+                preferences[Keys.AppLockPackageName] = ""
+                preferences[Keys.AppLockAppName] = ""
+                preferences[Keys.AppLockUnlockedUntil] = 0L
+                preferences[Keys.AppLockCooldownUntil] = 0L
+            }
+        }
+    }
+
+    suspend fun refreshEmergencyCoins(nowMillis: Long = System.currentTimeMillis()) {
+        context.purgeDataStore.edit { preferences ->
+            val state = lockStateFromPreferences(preferences).withEarnedCoins(nowMillis)
+            preferences[Keys.EmergencyCoins] = state.emergencyCoins
+            preferences[Keys.LastCoinEarnedDay] = state.lastCoinEarnedDay
         }
     }
 
@@ -142,5 +179,92 @@ class PurgeStore(private val context: Context) {
             preferences.remove(Keys.AllowSnooze)
             preferences.remove(Keys.Snoozed)
         }
+    }
+
+    private suspend fun updateLock(packageName: String, decision: String, grantedMinutes: Int, transform: (AppLockEntry) -> AppLockEntry) {
+        context.purgeDataStore.edit { preferences ->
+            val entries = lockStateFromPreferences(preferences).locks.map { entry ->
+                if (entry.packageName == packageName) transform(entry) else entry
+            }
+            preferences[Keys.AppLockEntries] = encodeLockEntries(entries)
+            preferences[Keys.AppLockEnabled] = entries.isNotEmpty()
+            preferences[Keys.AppLockLastDecision] = decision
+            preferences[Keys.AppLockLastGrantedMinutes] = grantedMinutes
+        }
+    }
+
+    private fun lockStateFromPreferences(preferences: Preferences): AppLockState {
+        val today = currentEpochDay()
+        val rawCoins = preferences[Keys.EmergencyCoins]
+        val rawLastDay = preferences[Keys.LastCoinEarnedDay]
+        val startingCoins = rawCoins ?: 10
+        val startingDay = rawLastDay ?: today
+        return AppLockState(
+            geminiApiKey = preferences[Keys.GeminiApiKey].orEmpty(),
+            locks = decodeLockEntries(preferences[Keys.AppLockEntries].orEmpty(), preferences),
+            lastDecision = preferences[Keys.AppLockLastDecision].orEmpty(),
+            lastGrantedMinutes = preferences[Keys.AppLockLastGrantedMinutes] ?: 0,
+            emergencyCoins = startingCoins,
+            lastCoinEarnedDay = startingDay,
+        ).withEarnedCoins()
+    }
+
+    private fun AppLockState.withEarnedCoins(nowMillis: Long = System.currentTimeMillis()): AppLockState {
+        val today = currentEpochDay(nowMillis)
+        val days = (today - lastCoinEarnedDay).coerceAtLeast(0L).toInt()
+        if (days == 0) return this
+        return copy(
+            emergencyCoins = emergencyCoins + days,
+            lastCoinEarnedDay = today,
+        )
+    }
+
+    private fun decodeLockEntries(json: String, preferences: Preferences): List<AppLockEntry> {
+        val parsed = runCatching {
+            val array = JSONArray(json)
+            List(array.length()) { index ->
+                val item = array.getJSONObject(index)
+                AppLockEntry(
+                    packageName = item.getString("packageName"),
+                    appName = item.optString("appName", item.getString("packageName")),
+                    reason = item.optString("reason"),
+                    unlockedUntilMillis = item.optLong("unlockedUntilMillis", 0L),
+                    cooldownUntilMillis = item.optLong("cooldownUntilMillis", 0L),
+                )
+            }.filter { it.packageName.isNotBlank() }
+        }.getOrDefault(emptyList())
+        if (parsed.isNotEmpty()) return parsed
+
+        val legacyEnabled = preferences[Keys.AppLockEnabled] ?: false
+        val legacyPackage = preferences[Keys.AppLockPackageName].orEmpty()
+        if (!legacyEnabled || legacyPackage.isBlank()) return emptyList()
+        return listOf(
+            AppLockEntry(
+                packageName = legacyPackage,
+                appName = preferences[Keys.AppLockAppName].orEmpty().ifBlank { legacyPackage },
+                reason = preferences[Keys.AppLockReason].orEmpty(),
+                unlockedUntilMillis = preferences[Keys.AppLockUnlockedUntil] ?: 0L,
+                cooldownUntilMillis = preferences[Keys.AppLockCooldownUntil] ?: 0L,
+            ),
+        )
+    }
+
+    private fun encodeLockEntries(entries: List<AppLockEntry>): String {
+        val array = JSONArray()
+        entries.forEach { entry ->
+            array.put(
+                JSONObject()
+                    .put("packageName", entry.packageName)
+                    .put("appName", entry.appName)
+                    .put("reason", entry.reason)
+                    .put("unlockedUntilMillis", entry.unlockedUntilMillis)
+                    .put("cooldownUntilMillis", entry.cooldownUntilMillis),
+            )
+        }
+        return array.toString()
+    }
+
+    private fun currentEpochDay(nowMillis: Long = System.currentTimeMillis()): Long {
+        return nowMillis / (24L * 60L * 60L * 1000L)
     }
 }
