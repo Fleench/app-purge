@@ -76,14 +76,17 @@ class PurgeOverlayService : Service() {
 
     private suspend fun loadAndShowOverlay() {
         val store = PurgeStore(applicationContext)
-        val config = store.config.first() ?: run {
+        val now = System.currentTimeMillis()
+        val config = store.configs.first().firstOrNull { it.purgeAtMillis <= now } ?: run {
+            PurgeScheduler.scheduleNext(applicationContext, store.currentConfigs())
             stopSelf()
             return
         }
         activeConfig = config
 
         if (!AppRepository(applicationContext).isInstalled(config.packageName)) {
-            store.clear()
+            store.clear(config.packageName)
+            PurgeScheduler.scheduleNext(applicationContext, store.currentConfigs())
             stopSelf()
             return
         }
@@ -215,8 +218,9 @@ class PurgeOverlayService : Service() {
     private fun snoozeActivePurge() {
         val config = activeConfig ?: return
         scope.launch {
-            val updated = PurgeStore(applicationContext).snoozeFor24Hours(config)
-            PurgeScheduler.schedule(applicationContext, updated)
+            val store = PurgeStore(applicationContext)
+            store.snoozeFor24Hours(config)
+            PurgeScheduler.scheduleNext(applicationContext, store.currentConfigs())
             removeOverlay()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -224,8 +228,9 @@ class PurgeOverlayService : Service() {
     }
 
     private suspend fun clearAndStop() {
-        PurgeStore(applicationContext).clear()
-        PurgeScheduler.cancel(applicationContext)
+        val store = PurgeStore(applicationContext)
+        activeConfig?.let { store.clear(it.packageName) }
+        PurgeScheduler.scheduleNext(applicationContext, store.currentConfigs())
         removeOverlay()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()

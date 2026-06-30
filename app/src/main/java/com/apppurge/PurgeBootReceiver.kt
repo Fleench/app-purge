@@ -17,9 +17,10 @@ class PurgeBootReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                PurgeStore(context.applicationContext).currentConfig()?.let { config ->
-                    PurgeScheduler.schedule(context.applicationContext, config)
-                }
+                PurgeScheduler.scheduleNext(
+                    context.applicationContext,
+                    PurgeStore(context.applicationContext).currentConfigs(),
+                )
             } finally {
                 pendingResult.finish()
             }
