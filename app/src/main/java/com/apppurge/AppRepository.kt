@@ -21,10 +21,17 @@ class AppRepository(private val context: Context) {
             .filter { it.packageName != context.packageName }
             .filter { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 }
             .map { appInfo ->
+                val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    packageManager.getPackageInfo(appInfo.packageName, PackageManager.PackageInfoFlags.of(0))
+                } else {
+                    @Suppress("DEPRECATION")
+                    packageManager.getPackageInfo(appInfo.packageName, 0)
+                }
                 InstalledApp(
                     packageName = appInfo.packageName,
                     label = appInfo.loadLabel(packageManager).toString(),
                     icon = appInfo.loadIcon(packageManager),
+                    firstInstallTimeMillis = packageInfo.firstInstallTime,
                 )
             }
             .sortedBy { it.label.lowercase() }

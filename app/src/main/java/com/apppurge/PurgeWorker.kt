@@ -22,6 +22,12 @@ class PurgeWorker(
             return Result.success()
         }
 
+        if (!ShizukuUninstaller.isBinderAvailable()) {
+            ShizukuUninstaller.launchFallbackUninstall(applicationContext, config.packageName)
+            PurgeScheduler.scheduleRetry(applicationContext)
+            return Result.success()
+        }
+
         if (!Settings.canDrawOverlays(applicationContext)) {
             Notifications.showOverlayPermissionNotification(applicationContext, config.appName)
             PurgeScheduler.scheduleRetry(applicationContext)

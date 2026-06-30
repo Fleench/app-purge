@@ -11,6 +11,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -27,6 +29,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -43,6 +46,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
@@ -54,11 +59,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.toBitmap
 import com.apppurge.data.PurgeConfig
 import com.apppurge.data.PurgeStore
 import com.apppurge.ui.theme.AppPurgeTheme
@@ -106,6 +113,7 @@ private fun AppPurgeApp() {
     val config by store.config.collectAsState(initial = null)
     var apps by remember { mutableStateOf<List<InstalledApp>>(emptyList()) }
     var selectedApp by remember { mutableStateOf<InstalledApp?>(null) }
+    var currentPage by remember { mutableStateOf(AppPage.Home) }
 
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -124,7 +132,10 @@ private fun AppPurgeApp() {
         }
 
         if (current.purgeAtMillis <= System.currentTimeMillis()) {
-            if (Settings.canDrawOverlays(context.applicationContext)) {
+            if (!ShizukuUninstaller.isBinderAvailable()) {
+                ShizukuUninstaller.launchFallbackUninstall(context.applicationContext, current.packageName)
+                PurgeScheduler.scheduleRetry(context.applicationContext)
+            } else if (Settings.canDrawOverlays(context.applicationContext)) {
                 ContextCompat.startForegroundService(
                     context.applicationContext,
                     Intent(context.applicationContext, PurgeOverlayService::class.java),
@@ -151,13 +162,31 @@ private fun AppPurgeApp() {
                 },
             )
         },
+        bottomBar = {
+            if (selectedApp == null) {
+                NavigationBar {
+                    NavigationBarItem(
+                        selected = currentPage == AppPage.Home,
+                        onClick = { currentPage = AppPage.Home },
+                        icon = { Icon(Icons.Filled.Delete, contentDescription = null) },
+                        label = { Text("Home") },
+                    )
+                    NavigationBarItem(
+                        selected = currentPage == AppPage.Apps,
+                        onClick = { currentPage = AppPage.Apps },
+                        icon = { Icon(Icons.Filled.Security, contentDescription = null) },
+                        label = { Text("Apps") },
+                    )
+                }
+            }
+        },
     ) { padding ->
-        if (selectedApp == null) {
-            MainScreen(
+        if (selectedApp == null && currentPage == AppPage.Home) {
+            HomeScreen(
                 modifier = Modifier.padding(padding),
                 config = config,
                 apps = apps,
-                onSelectApp = { selectedApp = it },
+                onGoToApps = { currentPage = AppPage.Apps },
                 onCancelConfig = {
                     scope.launch {
                         store.clear()
@@ -179,6 +208,12 @@ private fun AppPurgeApp() {
                 onRequestShizuku = {
                     ShizukuUninstaller.requestPermissionIfNeeded()
                 },
+            )
+        } else if (selectedApp == null) {
+            AppsScreen(
+                modifier = Modifier.padding(padding),
+                apps = apps,
+                onSelectApp = { selectedApp = it },
             )
         } else {
             ConfigureScreen(
@@ -204,16 +239,82 @@ private fun AppPurgeApp() {
     }
 }
 
+private enum class AppPage { Home, Apps }
+
 @Composable
-private fun MainScreen(
+private fun HomeScreen(
     modifier: Modifier,
     config: PurgeConfig?,
     apps: List<InstalledApp>,
-    onSelectApp: (InstalledApp) -> Unit,
+    onGoToApps: () -> Unit,
     onCancelConfig: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onRequestShizuku: () -> Unit,
+) {
+    val newAppsCount = remember(apps) {
+        val cutoff = System.currentTimeMillis() - 7L * 24L * 60L * 60L * 1000L
+        apps.count { it.firstInstallTimeMillis >= cutoff }
+    }
+    LazyColumn(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item { Spacer(Modifier.height(4.dp)) }
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                StatCard("Installed apps", apps.size.toString(), Modifier.weight(1f))
+                StatCard("New this week", newAppsCount.toString(), Modifier.weight(1f))
+            }
+        }
+        item {
+            PermissionPanel(
+                onRequestNotificationPermission = onRequestNotificationPermission,
+                onOpenOverlaySettings = onOpenOverlaySettings,
+                onRequestShizuku = onRequestShizuku,
+            )
+        }
+        item {
+            if (config != null) {
+                ActiveConfigCard(config = config, onCancelConfig = onCancelConfig)
+            } else {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("No active purges", fontWeight = FontWeight.SemiBold)
+                        Text("Pick an app and choose when it should be removed.")
+                    }
+                }
+            }
+        }
+        item {
+            Button(onClick = onGoToApps, modifier = Modifier.fillMaxWidth()) {
+                Text("Set up a purge")
+            }
+        }
+        item { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+@Composable
+private fun StatCard(title: String, value: String, modifier: Modifier = Modifier) {
+    Card(modifier) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(title)
+            Text(value, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun AppsScreen(
+    modifier: Modifier,
+    apps: List<InstalledApp>,
+    onSelectApp: (InstalledApp) -> Unit,
 ) {
     LazyColumn(
         modifier = modifier
@@ -223,36 +324,29 @@ private fun MainScreen(
     ) {
         item {
             Spacer(Modifier.height(4.dp))
-            PermissionPanel(
-                onRequestNotificationPermission = onRequestNotificationPermission,
-                onOpenOverlaySettings = onOpenOverlaySettings,
-                onRequestShizuku = onRequestShizuku,
-            )
-        }
-        if (config != null) {
-            item {
-                ActiveConfigCard(config = config, onCancelConfig = onCancelConfig)
-            }
-        }
-        item {
-            Text("Installed user apps", fontWeight = FontWeight.SemiBold)
+            Text("All apps", fontWeight = FontWeight.SemiBold)
         }
         items(apps, key = { it.packageName }) { app ->
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onSelectApp(app) },
-            ) {
-                ListItem(
-                    headlineContent = { Text(app.label) },
-                    supportingContent = { Text(app.packageName) },
-                    leadingContent = { Icon(Icons.Filled.Delete, contentDescription = null) },
-                )
-            }
+            AppRow(app = app, onClick = { onSelectApp(app) })
         }
-        item {
-            Spacer(Modifier.height(24.dp))
-        }
+        item { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+@Composable
+private fun AppRow(app: InstalledApp, onClick: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() },
+    ) {
+        val iconBitmap = remember(app.packageName) { app.icon.toBitmap(width = 96, height = 96).asImageBitmap() }
+        ListItem(
+            headlineContent = { Text(app.label) },
+            supportingContent = { Text(app.packageName) },
+            leadingContent = { Image(iconBitmap, contentDescription = null, modifier = Modifier.size(40.dp)) },
+            trailingContent = { AssistChip(onClick = onClick, label = { Text("Purge") }) },
+        )
     }
 }
 
@@ -265,8 +359,12 @@ private fun PermissionPanel(
     val context = LocalContext.current
     val notificationsGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
         ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-    val overlayGranted = Settings.canDrawOverlays(context)
-    val shizukuReady = ShizukuUninstaller.hasPermission()
+    val shizukuAvailable = ShizukuUninstaller.isBinderAvailable()
+    val overlayGranted = !shizukuAvailable || Settings.canDrawOverlays(context)
+    val shizukuReady = !shizukuAvailable || ShizukuUninstaller.hasPermission()
+
+    val hasActions = !notificationsGranted || !overlayGranted || !shizukuReady
+    if (!hasActions) return
 
     Card(Modifier.fillMaxWidth()) {
         Column(
@@ -274,27 +372,30 @@ private fun PermissionPanel(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text("Readiness", fontWeight = FontWeight.SemiBold)
-            PermissionRow(
-                icon = Icons.Filled.Notifications,
-                title = "Notifications",
-                ready = notificationsGranted,
-                action = "Allow",
-                onClick = onRequestNotificationPermission,
-            )
-            PermissionRow(
-                icon = Icons.Filled.Warning,
-                title = "Overlay",
-                ready = overlayGranted,
-                action = "Open settings",
-                onClick = onOpenOverlaySettings,
-            )
-            PermissionRow(
-                icon = Icons.Filled.Security,
-                title = "Shizuku",
-                ready = shizukuReady,
-                action = "Request",
-                onClick = onRequestShizuku,
-            )
+            if (!notificationsGranted) {
+                PermissionRow(
+                    icon = Icons.Filled.Notifications,
+                    title = "Notifications",
+                    action = "Allow",
+                    onClick = onRequestNotificationPermission,
+                )
+            }
+            if (!overlayGranted) {
+                PermissionRow(
+                    icon = Icons.Filled.Warning,
+                    title = "Overlay",
+                    action = "Open settings",
+                    onClick = onOpenOverlaySettings,
+                )
+            }
+            if (!shizukuReady) {
+                PermissionRow(
+                    icon = Icons.Filled.Security,
+                    title = "Shizuku",
+                    action = "Request",
+                    onClick = onRequestShizuku,
+                )
+            }
         }
     }
 }
@@ -303,7 +404,6 @@ private fun PermissionPanel(
 private fun PermissionRow(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     title: String,
-    ready: Boolean,
     action: String,
     onClick: () -> Unit,
 ) {
@@ -315,9 +415,9 @@ private fun PermissionRow(
         Icon(icon, contentDescription = null)
         Column(Modifier.weight(1f)) {
             Text(title)
-            Text(if (ready) "Ready" else "Required")
+            Text("Required")
         }
-        OutlinedButton(onClick = onClick, enabled = !ready) {
+        OutlinedButton(onClick = onClick) {
             Text(action)
         }
     }
