@@ -27,6 +27,28 @@ jobs:
         with:
           gradle-version: "8.11.1"
 
+      - name: Configure release signing
+        shell: bash
+        env:
+          APP_PURGE_KEYSTORE_BASE64: ${{ secrets.APP_PURGE_KEYSTORE_BASE64 }}
+          APP_PURGE_KEYSTORE_PASSWORD: ${{ secrets.APP_PURGE_KEYSTORE_PASSWORD }}
+          APP_PURGE_KEY_ALIAS: ${{ secrets.APP_PURGE_KEY_ALIAS }}
+          APP_PURGE_KEY_PASSWORD: ${{ secrets.APP_PURGE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$APP_PURGE_KEYSTORE_BASE64" ] || [ -z "$APP_PURGE_KEYSTORE_PASSWORD" ] || [ -z "$APP_PURGE_KEY_ALIAS" ] || [ -z "$APP_PURGE_KEY_PASSWORD" ]; then
+            echo "Release signing secrets are not configured." >&2
+            exit 1
+          fi
+
+          printf '%s' "$APP_PURGE_KEYSTORE_BASE64" | base64 --decode > app-purge-release.jks
+          {
+            printf 'storeFile=app-purge-release.jks\n'
+            printf 'storeType=JKS\n'
+            printf 'storePassword=%s\n' "$APP_PURGE_KEYSTORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$APP_PURGE_KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$APP_PURGE_KEY_PASSWORD"
+          } > keystore.properties
+
       - name: Build release APK
         run: gradle assembleRelease
 

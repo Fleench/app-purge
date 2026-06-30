@@ -1,8 +1,35 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+val keystoreProperties = Properties().apply {
+    val file = rootProject.file("keystore.properties")
+    if (file.exists()) {
+        file.inputStream().use { load(it) }
+    }
+}
+
+fun signingValue(propertyName: String, environmentName: String): String? {
+    return (keystoreProperties[propertyName] as? String)
+        ?.takeIf { it.isNotBlank() }
+        ?: System.getenv(environmentName)?.takeIf { it.isNotBlank() }
+}
+
+val releaseStoreFile = signingValue("storeFile", "APP_PURGE_KEYSTORE_FILE")
+val releaseStoreType = signingValue("storeType", "APP_PURGE_KEYSTORE_TYPE") ?: "JKS"
+val releaseStorePassword = signingValue("storePassword", "APP_PURGE_KEYSTORE_PASSWORD")
+val releaseKeyAlias = signingValue("keyAlias", "APP_PURGE_KEY_ALIAS")
+val releaseKeyPassword = signingValue("keyPassword", "APP_PURGE_KEY_PASSWORD")
+val hasReleaseSigning = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
 
 android {
     namespace = "com.apppurge"
@@ -12,8 +39,20 @@ android {
         applicationId = "com.apppurge"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.4.4"
+        versionCode = 10
+        versionName = "1.4.5"
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(requireNotNull(releaseStoreFile))
+                storeType = releaseStoreType
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
@@ -21,11 +60,9 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
         release {
-            // Sign local, debug, and CI release artifacts with the same standard
-            // debug key so APK updates share a certificate and install over the
-            // existing app instead of requiring an uninstall. Production
-            // distribution should replace this with a private release key.
-            signingConfig = signingConfigs.getByName("debug")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -64,4 +101,12 @@ dependencies {
     implementation("dev.rikka.shizuku:provider:13.1.5")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+}
+
+tasks.matching { it.name == "packageRelease" }.configureEach {
+    doFirst {
+        check(hasReleaseSigning) {
+            "Release signing is not configured. Create keystore.properties or set APP_PURGE_KEYSTORE_FILE, APP_PURGE_KEYSTORE_PASSWORD, APP_PURGE_KEY_ALIAS, and APP_PURGE_KEY_PASSWORD."
+        }
+    }
 }

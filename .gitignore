@@ -6,4 +6,7 @@
 *.iml
 build/
 local.properties
+keystore.properties
+*.jks
+*.keystore
 app/build/
