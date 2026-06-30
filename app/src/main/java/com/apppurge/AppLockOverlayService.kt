@@ -228,27 +228,130 @@ class AppLockOverlayService : Service() {
                 val now = System.currentTimeMillis()
                 if (decision.approved && action == LockAction.Remove) {
                     store.disableAppLock(entry.packageName, "Gemini approved removing the lock: ${decision.reason}")
-                    quitLockedApp(removeOnly = true)
+                    showDecisionResult(
+                        entry = entry,
+                        approved = true,
+                        reason = decision.reason,
+                        unlockMinutes = null,
+                        primaryActionLabel = "Continue",
+                        onPrimaryAction = { quitLockedApp(removeOnly = true) },
+                    )
                 } else if (decision.approved && decision.grantedMinutes > 0) {
+                    val unlockedUntilMillis = now + decision.grantedMinutes * 60_000L
                     store.applyUnlockDecision(
                         packageName = entry.packageName,
-                        unlockedUntilMillis = now + decision.grantedMinutes * 60_000L,
+                        unlockedUntilMillis = unlockedUntilMillis,
                         cooldownUntilMillis = now + decision.cooldownMinutes * 60_000L,
                         decision = "Gemini approved ${decision.grantedMinutes} minutes: ${decision.reason}",
                         grantedMinutes = decision.grantedMinutes,
                     )
-                    quitLockedApp(removeOnly = true)
+                    Notifications.showAppUnlockedNotification(this@AppLockOverlayService, entry.appName, unlockedUntilMillis)
+                    showDecisionResult(
+                        entry = entry,
+                        approved = true,
+                        reason = decision.reason,
+                        unlockMinutes = decision.grantedMinutes,
+                        primaryActionLabel = "Continue",
+                        onPrimaryAction = { quitLockedApp(removeOnly = true) },
+                    )
                 } else {
                     store.denyLockRequest(entry.packageName, now + decision.cooldownMinutes * 60_000L, "Gemini denied request: ${decision.reason}")
-                    Toast.makeText(this@AppLockOverlayService, "Gemini denied the request.", Toast.LENGTH_LONG).show()
-                    loadAndShowOverlay()
+                    showDecisionResult(
+                        entry = entry,
+                        approved = false,
+                        reason = decision.reason,
+                        unlockMinutes = null,
+                        primaryActionLabel = "Back",
+                        onPrimaryAction = { scope.launch { loadAndShowOverlay() } },
+                    )
                 }
             } catch (error: Exception) {
-                store.denyLockRequest(entry.packageName, System.currentTimeMillis() + 10L * 60_000L, "Gemini request failed: ${error.message ?: "Unknown error"}")
-                Toast.makeText(this@AppLockOverlayService, "Gemini request failed.", Toast.LENGTH_LONG).show()
-                loadAndShowOverlay()
+                val reason = error.message ?: "Unknown error"
+                store.denyLockRequest(entry.packageName, System.currentTimeMillis() + 10L * 60_000L, "Gemini request failed: $reason")
+                showDecisionResult(
+                    entry = entry,
+                    approved = false,
+                    reason = "Gemini request failed: $reason",
+                    unlockMinutes = null,
+                    primaryActionLabel = "Back",
+                    onPrimaryAction = { scope.launch { loadAndShowOverlay() } },
+                )
             }
         }
+    }
+
+    private fun showDecisionResult(
+        entry: AppLockEntry,
+        approved: Boolean,
+        reason: String,
+        unlockMinutes: Int?,
+        primaryActionLabel: String,
+        onPrimaryAction: () -> Unit,
+    ) {
+        removeOverlay()
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(Color.argb(245, 17, 24, 39))
+            setPadding(48, 48, 48, 48)
+        }
+        val title = TextView(this).apply {
+            text = if (approved) "Approved" else "Denied"
+            setTextColor(Color.WHITE)
+            textSize = 28f
+            gravity = Gravity.CENTER
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        }
+        val appName = TextView(this).apply {
+            text = entry.appName.ifBlank { "App" }
+            setTextColor(Color.rgb(229, 231, 235))
+            textSize = 20f
+            gravity = Gravity.CENTER
+            setPadding(0, 12, 0, 12)
+        }
+        val unlockTime = TextView(this).apply {
+            text = unlockMinutes?.let { "Unlock time: $it minutes" }.orEmpty()
+            setTextColor(Color.rgb(209, 213, 219))
+            textSize = 18f
+            gravity = Gravity.CENTER
+            visibility = if (unlockMinutes == null) View.GONE else View.VISIBLE
+        }
+        val reasonView = TextView(this).apply {
+            text = reason
+            setTextColor(Color.rgb(209, 213, 219))
+            textSize = 16f
+            gravity = Gravity.CENTER
+            setPadding(0, 18, 0, 24)
+        }
+        val primaryButton = Button(this).apply {
+            text = primaryActionLabel
+            textSize = 18f
+            setOnClickListener { onPrimaryAction() }
+        }
+
+        root.addView(title, matchWrapParams())
+        root.addView(appName, matchWrapParams())
+        root.addView(unlockTime, matchWrapParams())
+        root.addView(reasonView, matchWrapParams())
+        root.addView(primaryButton, matchWrapParams())
+
+        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            layoutType,
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT,
+        ).apply { gravity = Gravity.CENTER }
+
+        overlayView = root
+        windowManager.addView(root, params)
     }
 
     private fun quitLockedApp(removeOnly: Boolean = false) {

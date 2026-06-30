@@ -12,8 +12,8 @@ android {
         applicationId = "com.apppurge"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.4.1"
+        versionCode = 9
+        versionName = "1.4.4"
     }
 
     buildTypes {

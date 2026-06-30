@@ -142,10 +142,12 @@ private fun AppPurgeApp() {
     val lockState by store.lockState.collectAsState(initial = null)
     var apps by remember { mutableStateOf<List<InstalledApp>>(emptyList()) }
     var selectedApp by remember { mutableStateOf<InstalledApp?>(null) }
+    var configuringSelectedApp by remember { mutableStateOf(false) }
     val activity = context as? MainActivity
     var activeLockPackage by remember { mutableStateOf(activity?.intent?.getStringExtra(MainActivity.EXTRA_LOCKED_PACKAGE).orEmpty()) }
     var currentPage by remember { mutableStateOf(if (activity?.intent?.getBooleanExtra(MainActivity.EXTRA_SHOW_LOCK_GATE, false) == true) AppPage.LockGate else AppPage.Home) }
     var appListMode by remember { mutableStateOf(AppListMode.All) }
+    var lockRequestResult by remember { mutableStateOf<AppLockRequestResult?>(null) }
 
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -273,20 +275,73 @@ private fun AppPurgeApp() {
                 emptyMessage = appListMode.emptyMessage,
                 onBack = { currentPage = AppPage.Home },
                 lockState = currentLockState,
-                onSelectApp = { selectedApp = it },
+                onSelectApp = {
+                    selectedApp = it
+                    configuringSelectedApp = false
+                },
                 onToggleLock = { app, isLocked ->
                     scope.launch {
                         if (isLocked) store.disableAppLock(app.packageName, "Lock removed for ${app.label}.")
                         else store.enableAppLock(app.packageName, app.label)
                     }
                 },
-                onEmergencyUnlock = { app -> scope.launch { store.spendEmergencyCoin(app.packageName) } },
+                onEmergencyUnlock = { app ->
+                    scope.launch {
+                        val now = System.currentTimeMillis()
+                        if (store.spendEmergencyCoin(app.packageName, now)) {
+                            Notifications.showAppUnlockedNotification(
+                                context.applicationContext,
+                                app.label,
+                                now + 3L * 60L * 60L * 1000L,
+                            )
+                        }
+                    }
+                },
+            )
+        } else if (!configuringSelectedApp) {
+            val app = selectedApp!!
+            val lockEntry = currentLockState?.entryForPackage(app.packageName)
+            AppDetailsScreen(
+                modifier = Modifier.padding(padding),
+                app = app,
+                config = config,
+                lockEntry = lockEntry,
+                emergencyCoins = currentLockState?.emergencyCoins ?: 0,
+                onBack = {
+                    selectedApp = null
+                    configuringSelectedApp = false
+                },
+                onConfigurePurge = { configuringSelectedApp = true },
+                onCancelPurge = {
+                    scope.launch {
+                        store.clear()
+                        PurgeScheduler.cancel(context.applicationContext)
+                    }
+                },
+                onToggleLock = {
+                    scope.launch {
+                        if (lockEntry != null) store.disableAppLock(app.packageName, "Lock removed for ${app.label}.")
+                        else store.enableAppLock(app.packageName, app.label)
+                    }
+                },
+                onEmergencyUnlock = {
+                    scope.launch {
+                        val now = System.currentTimeMillis()
+                        if (store.spendEmergencyCoin(app.packageName, now)) {
+                            Notifications.showAppUnlockedNotification(
+                                context.applicationContext,
+                                app.label,
+                                now + 3L * 60L * 60L * 1000L,
+                            )
+                        }
+                    }
+                },
             )
         } else {
             ConfigureScreen(
                 modifier = Modifier.padding(padding),
                 app = selectedApp!!,
-                onBack = { selectedApp = null },
+                onBack = { configuringSelectedApp = false },
                 onSave = { purgeAtMillis, allowSnooze ->
                     scope.launch {
                         val newConfig = PurgeConfig(
@@ -298,7 +353,7 @@ private fun AppPurgeApp() {
                         )
                         store.save(newConfig)
                         PurgeScheduler.schedule(context.applicationContext, newConfig)
-                        selectedApp = null
+                        configuringSelectedApp = false
                     }
                 },
             )
@@ -310,8 +365,17 @@ private fun AppPurgeApp() {
             lockState = currentLockState,
             lockEntry = activeLockEntry,
             appIcon = activeLockApp?.icon?.toBitmap(width = 96, height = 96)?.asImageBitmap(),
+            requestResult = lockRequestResult,
             onSaveApiKey = { apiKey -> scope.launch { store.saveGeminiApiKey(apiKey) } },
             onDismiss = { currentPage = AppPage.Home },
+            onResultDismiss = {
+                if (lockRequestResult?.closeOnDismiss == true) {
+                    lockRequestResult = null
+                    currentPage = AppPage.Home
+                } else {
+                    lockRequestResult = null
+                }
+            },
             onRequest = { action, reason ->
                 scope.launch(Dispatchers.IO) {
                     try {
@@ -321,21 +385,58 @@ private fun AppPurgeApp() {
                         val now = System.currentTimeMillis()
                         if (decision.approved && action == LockAction.Remove) {
                             store.disableAppLock(entry.packageName, "Gemini approved removing the lock: ${decision.reason}")
-                            withContext(Dispatchers.Main) { currentPage = AppPage.Home }
+                            withContext(Dispatchers.Main) {
+                                lockRequestResult = AppLockRequestResult(
+                                    approved = true,
+                                    appName = entry.appName,
+                                    reason = decision.reason,
+                                    unlockMinutes = null,
+                                    closeOnDismiss = true,
+                                )
+                            }
                         } else if (decision.approved && decision.grantedMinutes > 0) {
+                            val unlockedUntilMillis = now + decision.grantedMinutes * 60_000L
                             store.applyUnlockDecision(
                                 packageName = entry.packageName,
-                                unlockedUntilMillis = now + decision.grantedMinutes * 60_000L,
+                                unlockedUntilMillis = unlockedUntilMillis,
                                 cooldownUntilMillis = now + decision.cooldownMinutes * 60_000L,
                                 decision = "Gemini approved ${decision.grantedMinutes} minutes: ${decision.reason}",
                                 grantedMinutes = decision.grantedMinutes,
                             )
-                            withContext(Dispatchers.Main) { currentPage = AppPage.Home }
+                            Notifications.showAppUnlockedNotification(context.applicationContext, entry.appName, unlockedUntilMillis)
+                            withContext(Dispatchers.Main) {
+                                lockRequestResult = AppLockRequestResult(
+                                    approved = true,
+                                    appName = entry.appName,
+                                    reason = decision.reason,
+                                    unlockMinutes = decision.grantedMinutes,
+                                    closeOnDismiss = true,
+                                )
+                            }
                         } else {
                             store.denyLockRequest(entry.packageName, now + decision.cooldownMinutes * 60_000L, "Gemini denied request: ${decision.reason}")
+                            withContext(Dispatchers.Main) {
+                                lockRequestResult = AppLockRequestResult(
+                                    approved = false,
+                                    appName = entry.appName,
+                                    reason = decision.reason,
+                                    unlockMinutes = null,
+                                    closeOnDismiss = false,
+                                )
+                            }
                         }
                     } catch (error: Exception) {
-                        store.denyLockRequest(activeLockEntry.packageName, System.currentTimeMillis() + 10L * 60_000L, "Gemini request failed: ${error.message ?: "Unknown error"}")
+                        val reason = error.message ?: "Unknown error"
+                        store.denyLockRequest(activeLockEntry.packageName, System.currentTimeMillis() + 10L * 60_000L, "Gemini request failed: $reason")
+                        withContext(Dispatchers.Main) {
+                            lockRequestResult = AppLockRequestResult(
+                                approved = false,
+                                appName = activeLockEntry.appName,
+                                reason = "Gemini request failed: $reason",
+                                unlockMinutes = null,
+                                closeOnDismiss = false,
+                            )
+                        }
                     }
                 }
             },
@@ -344,6 +445,14 @@ private fun AppPurgeApp() {
 }
 
 private enum class AppPage { Home, Apps, Settings, LockGate }
+
+private data class AppLockRequestResult(
+    val approved: Boolean,
+    val appName: String,
+    val reason: String,
+    val unlockMinutes: Int?,
+    val closeOnDismiss: Boolean,
+)
 
 private enum class AppListMode(
     val title: String,
@@ -609,6 +718,159 @@ private fun AppRow(
             colors = ListItemDefaults.colors(containerColor = Color.Transparent),
         )
     }
+}
+
+@Composable
+private fun AppDetailsScreen(
+    modifier: Modifier,
+    app: InstalledApp,
+    config: PurgeConfig?,
+    lockEntry: com.apppurge.data.AppLockEntry?,
+    emergencyCoins: Int,
+    onBack: () -> Unit,
+    onConfigurePurge: () -> Unit,
+    onCancelPurge: () -> Unit,
+    onToggleLock: () -> Unit,
+    onEmergencyUnlock: () -> Unit,
+) {
+    val formatter = remember { DateTimeFormatter.ofPattern("MMM d, yyyy h:mm a") }
+    val now = System.currentTimeMillis()
+    val appIcon = remember(app.packageName) { app.icon.toBitmap(width = 128, height = 128).asImageBitmap() }
+    val installedAt = remember(app.firstInstallTimeMillis) {
+        Instant.ofEpochMilli(app.firstInstallTimeMillis).atZone(ZoneId.systemDefault()).format(formatter)
+    }
+    val purgeForThisApp = config?.takeIf { it.packageName == app.packageName }
+    val purgeText = purgeForThisApp?.let {
+        val date = Instant.ofEpochMilli(it.purgeAtMillis).atZone(ZoneId.systemDefault()).format(formatter)
+        "Scheduled for $date"
+    } ?: config?.let {
+        "Another app is scheduled: ${it.appName}"
+    } ?: "No purge scheduled"
+    val lockStatus = when {
+        lockEntry == null -> "Not locked"
+        lockEntry.unlockedUntilMillis > now -> "Temporarily unlocked until ${formatMillis(lockEntry.unlockedUntilMillis, formatter)}"
+        else -> "Locked"
+    }
+    val cooldownText = lockEntry?.cooldownUntilMillis
+        ?.takeIf { it > now }
+        ?.let { "Cooldown until ${formatMillis(it, formatter)}" }
+        ?: "No cooldown"
+
+    LazyColumn(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            Spacer(Modifier.height(4.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("App info", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                FilledTonalButton(onClick = onBack) {
+                    Icon(Icons.Filled.ArrowBack, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Apps")
+                }
+            }
+        }
+        item {
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Image(appIcon, contentDescription = null, modifier = Modifier.size(56.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(app.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(app.packageName, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+        item {
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Purge", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    StatusLine("Status", purgeText)
+                    purgeForThisApp?.let {
+                        StatusLine("Snooze", if (it.allowSnooze) "One 24h snooze allowed" else "No snooze")
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(onClick = onConfigurePurge, modifier = Modifier.weight(1f)) {
+                            Text(if (purgeForThisApp == null) "Set purge" else "Change purge")
+                        }
+                        if (purgeForThisApp != null) {
+                            OutlinedButton(onClick = onCancelPurge, modifier = Modifier.weight(1f)) {
+                                Text("Cancel")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("App lock", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    StatusLine("Status", lockStatus)
+                    StatusLine("Cooldown", cooldownText)
+                    lockEntry?.reason?.takeIf { it.isNotBlank() }?.let {
+                        StatusLine("Reason", it)
+                    }
+                    StatusLine("Emergency coins", emergencyCoins.toString())
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(onClick = onToggleLock, modifier = Modifier.weight(1f)) {
+                            Text(if (lockEntry == null) "Lock app" else "Remove lock")
+                        }
+                        if (lockEntry != null) {
+                            OutlinedButton(
+                                onClick = onEmergencyUnlock,
+                                enabled = emergencyCoins > 0,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("Emergency")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Install", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    StatusLine("Installed", installedAt)
+                }
+            }
+        }
+        item { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+@Composable
+private fun StatusLine(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            label,
+            modifier = Modifier.weight(0.34f),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(value, modifier = Modifier.weight(0.66f))
+    }
+}
+
+private fun formatMillis(millis: Long, formatter: DateTimeFormatter): String {
+    return Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).format(formatter)
 }
 
 @Composable
@@ -961,8 +1223,10 @@ private fun LockPopup(
     lockState: AppLockState,
     lockEntry: com.apppurge.data.AppLockEntry,
     appIcon: ImageBitmap?,
+    requestResult: AppLockRequestResult?,
     onSaveApiKey: (String) -> Unit,
     onDismiss: () -> Unit,
+    onResultDismiss: () -> Unit,
     onRequest: (LockAction, String) -> Unit,
 ) {
     var apiKey by remember(lockState.geminiApiKey) { mutableStateOf(lockState.geminiApiKey) }
@@ -972,6 +1236,28 @@ private fun LockPopup(
     val formatter = remember { DateTimeFormatter.ofPattern("MMM d h:mm a") }
     val cooldown = lockEntry.cooldownUntilMillis.takeIf { it > System.currentTimeMillis() }?.let {
         Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()).format(formatter)
+    }
+
+    if (requestResult != null) {
+        AlertDialog(
+            onDismissRequest = onResultDismiss,
+            confirmButton = {
+                Button(onClick = onResultDismiss) {
+                    Text(if (requestResult.closeOnDismiss) "Continue" else "Back")
+                }
+            },
+            title = { Text(if (requestResult.approved) "Approved" else "Denied") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(requestResult.appName.ifBlank { "App" }, style = MaterialTheme.typography.titleMedium)
+                    requestResult.unlockMinutes?.let { minutes ->
+                        Text("Unlock time: $minutes minutes", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Text(requestResult.reason, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            },
+        )
+        return
     }
 
     AlertDialog(
