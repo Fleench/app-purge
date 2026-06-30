@@ -100,6 +100,7 @@ class MainActivity : ComponentActivity() {
     companion object {
         const val EXTRA_SHOW_LOCK_GATE = "com.apppurge.extra.SHOW_LOCK_GATE"
         const val EXTRA_LOCKED_PACKAGE = "com.apppurge.extra.LOCKED_PACKAGE"
+        const val EXTRA_CONFIGURE_PACKAGE = "com.apppurge.extra.CONFIGURE_PACKAGE"
     }
     private val shizukuPermissionListener =
         Shizuku.OnRequestPermissionResultListener { _, _ -> }
@@ -120,7 +121,9 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.getBooleanExtra(EXTRA_SHOW_LOCK_GATE, false)) {
+        if (intent.getBooleanExtra(EXTRA_SHOW_LOCK_GATE, false) ||
+            intent.getStringExtra(EXTRA_CONFIGURE_PACKAGE).isNullOrBlank().not()
+        ) {
             recreate()
         }
     }
@@ -157,7 +160,19 @@ private fun AppPurgeApp() {
     ) { }
 
     LaunchedEffect(Unit) {
-        apps = withContext(Dispatchers.IO) { repository.installedUserApps() }
+        val installedApps = withContext(Dispatchers.IO) { repository.installedUserApps() }
+        apps = installedApps
+        activity?.intent?.getStringExtra(MainActivity.EXTRA_CONFIGURE_PACKAGE)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { packageName ->
+                val app = installedApps.firstOrNull { it.packageName == packageName }
+                    ?: withContext(Dispatchers.IO) { repository.installedApp(packageName) }
+                if (app != null) {
+                    selectedApp = app
+                    configuringSelectedApp = true
+                    currentPage = AppPage.Home
+                }
+            }
         store.refreshEmergencyCoins()
     }
 

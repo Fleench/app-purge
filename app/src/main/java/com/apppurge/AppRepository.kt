@@ -38,17 +38,33 @@ class AppRepository(private val context: Context) {
             .toList()
     }
 
-    fun isInstalled(packageName: String): Boolean {
+    fun installedApp(packageName: String): InstalledApp? {
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val appInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                packageManager.getApplicationInfo(packageName, PackageManager.ApplicationInfoFlags.of(0))
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getApplicationInfo(packageName, 0)
+            }
+            if (appInfo.flags and ApplicationInfo.FLAG_SYSTEM != 0 || appInfo.packageName == context.packageName) {
+                return null
+            }
+            val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
             } else {
                 @Suppress("DEPRECATION")
                 packageManager.getPackageInfo(packageName, 0)
             }
-            true
+            InstalledApp(
+                packageName = appInfo.packageName,
+                label = appInfo.loadLabel(packageManager).toString(),
+                icon = appInfo.loadIcon(packageManager),
+                firstInstallTimeMillis = packageInfo.firstInstallTime,
+            )
         } catch (_: PackageManager.NameNotFoundException) {
-            false
+            null
         }
     }
+
+    fun isInstalled(packageName: String): Boolean = installedApp(packageName) != null
 }

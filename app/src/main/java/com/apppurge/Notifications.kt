@@ -21,6 +21,7 @@ object Notifications {
     const val PERMISSION_NOTIFICATION_ID = 2002
     const val APP_LOCK_NOTIFICATION_ID = 2003
     const val APP_LOCK_UNLOCKED_NOTIFICATION_ID = 2004
+    const val NEW_APP_NOTIFICATION_ID = 2005
 
     fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -197,6 +198,40 @@ object Notifications {
         NotificationManagerCompat.from(context).notify(PERMISSION_NOTIFICATION_ID, notification)
     }
 
+    fun showNewAppPurgePrompt(context: Context, packageName: String, appName: String) {
+        ensureChannel(context)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(MainActivity.EXTRA_CONFIGURE_PACKAGE, packageName)
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            packageName.hashCode() + 200_000,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("Set a purge for $appName?")
+            .setContentText("Tap to choose when App Purge should remove this new app.")
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .bigText("$appName was just installed. Tap to choose a purge date before it lingers on your device."),
+            )
+            .setContentIntent(pendingIntent)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setAutoCancel(true)
+            .build()
+        NotificationManagerCompat.from(context).notify(newAppNotificationId(packageName), notification)
+    }
+
     private fun formatDuration(millis: Long): String {
         val totalMinutes = (millis / 60_000L).coerceAtLeast(1L)
         val hours = totalMinutes / 60L
@@ -214,6 +249,10 @@ object Notifications {
 
     private fun appUnlockedNotificationId(packageName: String): Int {
         return APP_LOCK_UNLOCKED_NOTIFICATION_ID + (packageName.hashCode() and 0x0fffffff)
+    }
+
+    private fun newAppNotificationId(packageName: String): Int {
+        return NEW_APP_NOTIFICATION_ID + (packageName.hashCode() and 0x0fffffff)
     }
 
     private fun appPurgePendingIntent(context: Context, packageName: String): PendingIntent {
