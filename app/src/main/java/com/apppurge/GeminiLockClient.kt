@@ -19,9 +19,9 @@ object GeminiLockClient {
             Their stated reason is: "$requestReason".
 
             Decide if this request is consistent with the original lock intent.
-            Temporary unlock requests should be strict. Approve only when the reason is specific, necessary, time-bounded, and consistent with the lock intent.
-            Deny vague, boredom, habit, entertainment, scrolling, procrastination, "just checking", or weak convenience reasons.
-            For approved temporary unlocks, grant the shortest practical time between 5 and 60 minutes. Prefer 5-15 minutes unless a clear task needs more.
+            Temporary unlock requests should be balanced. Approve short entertainment or leisure reasons when the user is explicit about what they want to do and the request still respects the lock intent.
+            Deny vague, boredom, habit, scrolling, procrastination, "just checking", or weak convenience reasons when they are not tied to a deliberate short activity.
+            For approved temporary unlocks, grant the shortest practical time between 5 and 60 minutes. Prefer 5-15 minutes for entertainment or leisure. Grant more than 15 minutes only when the user gives a specific, time-bounded, and compelling reason for needing a longer session.
             Permanent remove-lock requests should be very strict and usually denied unless the reason clearly shows the lock is permanently no longer needed.
             Always set a cooldown in minutes before another Gemini request. Denials should normally cool down for at least 120 minutes.
             Return only JSON with keys: approved (boolean), granted_minutes (integer 0-60), cooldown_minutes (integer 0-1440), reason (string).
