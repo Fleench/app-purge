@@ -35,6 +35,7 @@ class PurgeStore(private val context: Context) {
         val AppLockUnlockedUntil = longPreferencesKey("app_lock_unlocked_until")
         val AppLockCooldownUntil = longPreferencesKey("app_lock_cooldown_until")
         val AppLockEntries = stringPreferencesKey("app_lock_entries")
+        val PurgeConfigs = stringPreferencesKey("purge_configs")
         val AppLockLastDecision = stringPreferencesKey("app_lock_last_decision")
         val AppLockLastGrantedMinutes = intPreferencesKey("app_lock_last_granted_minutes")
         val EmergencyCoins = intPreferencesKey("app_lock_emergency_coins")
@@ -49,19 +50,13 @@ class PurgeStore(private val context: Context) {
     val lockState: Flow<AppLockState> = preferences
         .map { preferences -> lockStateFromPreferences(preferences) }
 
-    val config: Flow<PurgeConfig?> = preferences
-        .map { preferences ->
-            val packageName = preferences[Keys.PackageName] ?: return@map null
-            val appName = preferences[Keys.AppName] ?: packageName
-            val purgeAtMillis = preferences[Keys.PurgeAtMillis] ?: return@map null
-            PurgeConfig(
-                packageName = packageName,
-                appName = appName,
-                purgeAtMillis = purgeAtMillis,
-                allowSnooze = preferences[Keys.AllowSnooze] ?: false,
-                snoozed = preferences[Keys.Snoozed] ?: false,
-            )
-        }
+    val configs: Flow<List<PurgeConfig>> = preferences
+        .map { preferences -> purgeConfigsFromPreferences(preferences) }
+
+    val config: Flow<PurgeConfig?> = configs
+        .map { configs -> configs.minByOrNull { it.purgeAtMillis } }
+
+    suspend fun currentConfigs(): List<PurgeConfig> = configs.first()
 
     suspend fun currentConfig(): PurgeConfig? = config.first()
 
@@ -154,11 +149,10 @@ class PurgeStore(private val context: Context) {
 
     suspend fun save(config: PurgeConfig) {
         context.purgeDataStore.edit { preferences ->
-            preferences[Keys.PackageName] = config.packageName
-            preferences[Keys.AppName] = config.appName
-            preferences[Keys.PurgeAtMillis] = config.purgeAtMillis
-            preferences[Keys.AllowSnooze] = config.allowSnooze
-            preferences[Keys.Snoozed] = config.snoozed
+            val configs = purgeConfigsFromPreferences(preferences)
+                .filterNot { it.packageName == config.packageName } + config
+            preferences[Keys.PurgeConfigs] = encodePurgeConfigs(configs)
+            writeLegacyCurrentConfig(preferences, configs.minByOrNull { it.purgeAtMillis })
         }
     }
 
@@ -171,14 +165,81 @@ class PurgeStore(private val context: Context) {
         return updated
     }
 
-    suspend fun clear() {
+    suspend fun clear(packageName: String? = null) {
         context.purgeDataStore.edit { preferences ->
+            if (packageName == null) {
+                preferences.remove(Keys.PurgeConfigs)
+                writeLegacyCurrentConfig(preferences, null)
+            } else {
+                val configs = purgeConfigsFromPreferences(preferences).filterNot { it.packageName == packageName }
+                preferences[Keys.PurgeConfigs] = encodePurgeConfigs(configs)
+                writeLegacyCurrentConfig(preferences, configs.minByOrNull { it.purgeAtMillis })
+            }
+        }
+    }
+
+
+    private fun purgeConfigsFromPreferences(preferences: Preferences): List<PurgeConfig> {
+        val parsed = decodePurgeConfigs(preferences[Keys.PurgeConfigs].orEmpty())
+        if (parsed.isNotEmpty()) return parsed.sortedBy { it.purgeAtMillis }
+        val packageName = preferences[Keys.PackageName] ?: return emptyList()
+        val purgeAtMillis = preferences[Keys.PurgeAtMillis] ?: return emptyList()
+        return listOf(
+            PurgeConfig(
+                packageName = packageName,
+                appName = preferences[Keys.AppName] ?: packageName,
+                purgeAtMillis = purgeAtMillis,
+                allowSnooze = preferences[Keys.AllowSnooze] ?: false,
+                snoozed = preferences[Keys.Snoozed] ?: false,
+            ),
+        )
+    }
+
+    private fun decodePurgeConfigs(json: String): List<PurgeConfig> {
+        return runCatching {
+            val array = JSONArray(json)
+            List(array.length()) { index ->
+                val item = array.getJSONObject(index)
+                PurgeConfig(
+                    packageName = item.getString("packageName"),
+                    appName = item.optString("appName", item.getString("packageName")),
+                    purgeAtMillis = item.getLong("purgeAtMillis"),
+                    allowSnooze = item.optBoolean("allowSnooze", false),
+                    snoozed = item.optBoolean("snoozed", false),
+                )
+            }.filter { it.packageName.isNotBlank() }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun encodePurgeConfigs(configs: List<PurgeConfig>): String {
+        val array = JSONArray()
+        configs.sortedBy { it.purgeAtMillis }.forEach { config ->
+            array.put(
+                JSONObject()
+                    .put("packageName", config.packageName)
+                    .put("appName", config.appName)
+                    .put("purgeAtMillis", config.purgeAtMillis)
+                    .put("allowSnooze", config.allowSnooze)
+                    .put("snoozed", config.snoozed),
+            )
+        }
+        return array.toString()
+    }
+
+    private fun writeLegacyCurrentConfig(preferences: Preferences, config: PurgeConfig?) {
+        if (config == null) {
             preferences.remove(Keys.PackageName)
             preferences.remove(Keys.AppName)
             preferences.remove(Keys.PurgeAtMillis)
             preferences.remove(Keys.AllowSnooze)
             preferences.remove(Keys.Snoozed)
+            return
         }
+        preferences[Keys.PackageName] = config.packageName
+        preferences[Keys.AppName] = config.appName
+        preferences[Keys.PurgeAtMillis] = config.purgeAtMillis
+        preferences[Keys.AllowSnooze] = config.allowSnooze
+        preferences[Keys.Snoozed] = config.snoozed
     }
 
     private suspend fun updateLock(packageName: String, decision: String, grantedMinutes: Int, transform: (AppLockEntry) -> AppLockEntry) {

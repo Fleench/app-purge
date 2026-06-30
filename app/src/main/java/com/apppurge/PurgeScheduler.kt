@@ -18,9 +18,17 @@ object PurgeScheduler {
     private const val RETRY_DELAY_MILLIS = 60_000L
 
     fun schedule(context: Context, config: PurgeConfig) {
-        val delayMillis = (config.purgeAtMillis - System.currentTimeMillis()).coerceAtLeast(0L)
+        scheduleNext(context, listOf(config))
+    }
+
+    fun scheduleNext(context: Context, configs: List<PurgeConfig>) {
+        val next = configs.minByOrNull { it.purgeAtMillis } ?: run {
+            cancel(context)
+            return
+        }
+        val delayMillis = (next.purgeAtMillis - System.currentTimeMillis()).coerceAtLeast(0L)
         enqueueWork(context, UNIQUE_WORK_NAME, delayMillis)
-        scheduleAlarm(context, config.purgeAtMillis)
+        scheduleAlarm(context, next.purgeAtMillis)
     }
 
     fun scheduleRetry(context: Context) {

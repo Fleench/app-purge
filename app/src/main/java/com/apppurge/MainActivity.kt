@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Warning
@@ -139,7 +140,7 @@ private fun AppPurgeApp() {
     val scope = rememberCoroutineScope()
     val store = remember { PurgeStore(context.applicationContext) }
     val repository = remember { AppRepository(context.applicationContext) }
-    val config by store.config.collectAsState(initial = null)
+    val configs by store.configs.collectAsState(initial = emptyList())
     val lockState by store.lockState.collectAsState(initial = null)
     var apps by remember { mutableStateOf<List<InstalledApp>>(emptyList()) }
     var selectedApp by remember { mutableStateOf<InstalledApp?>(null) }
@@ -160,29 +161,26 @@ private fun AppPurgeApp() {
         store.refreshEmergencyCoins()
     }
 
-    LaunchedEffect(config) {
-        val current = config ?: return@LaunchedEffect
-        if (!repository.isInstalled(current.packageName)) {
-            store.clear()
-            PurgeScheduler.cancel(context.applicationContext)
+    LaunchedEffect(configs) {
+        val activeConfigs = configs.filter { repository.isInstalled(it.packageName) }
+        configs.filterNot { repository.isInstalled(it.packageName) }.forEach { store.clear(it.packageName) }
+        val current = activeConfigs.firstOrNull { it.purgeAtMillis <= System.currentTimeMillis() }
+        if (current == null) {
+            PurgeScheduler.scheduleNext(context.applicationContext, activeConfigs)
             return@LaunchedEffect
         }
 
-        if (current.purgeAtMillis <= System.currentTimeMillis()) {
-            if (!ShizukuUninstaller.isBinderAvailable()) {
-                ShizukuUninstaller.launchFallbackUninstall(context.applicationContext, current.packageName)
-                PurgeScheduler.scheduleRetry(context.applicationContext)
-            } else if (Settings.canDrawOverlays(context.applicationContext)) {
-                ContextCompat.startForegroundService(
-                    context.applicationContext,
-                    Intent(context.applicationContext, PurgeOverlayService::class.java),
-                )
-            } else {
-                Notifications.showOverlayPermissionNotification(context.applicationContext, current.appName)
-                PurgeScheduler.scheduleRetry(context.applicationContext)
-            }
+        if (!ShizukuUninstaller.isBinderAvailable()) {
+            ShizukuUninstaller.launchFallbackUninstall(context.applicationContext, current.packageName)
+            PurgeScheduler.scheduleRetry(context.applicationContext)
+        } else if (Settings.canDrawOverlays(context.applicationContext)) {
+            ContextCompat.startForegroundService(
+                context.applicationContext,
+                Intent(context.applicationContext, PurgeOverlayService::class.java),
+            )
         } else {
-            PurgeScheduler.schedule(context.applicationContext, current)
+            Notifications.showOverlayPermissionNotification(context.applicationContext, current.appName)
+            PurgeScheduler.scheduleRetry(context.applicationContext)
         }
     }
 
@@ -237,7 +235,7 @@ private fun AppPurgeApp() {
         } else if (selectedApp == null && currentPage == AppPage.Home) {
             HomeScreen(
                 modifier = Modifier.padding(padding),
-                config = config,
+                configs = configs,
                 apps = apps,
                 onGoToAllApps = {
                     appListMode = AppListMode.All
@@ -247,6 +245,11 @@ private fun AppPurgeApp() {
                     appListMode = AppListMode.NewThisWeek
                     currentPage = AppPage.Apps
                 },
+                onGoToLockedApps = {
+                    appListMode = AppListMode.Locked
+                    currentPage = AppPage.Apps
+                },
+                lockState = currentLockState,
                 onCancelConfig = {
                     scope.launch {
                         store.clear()
@@ -309,7 +312,7 @@ private fun AppPurgeApp() {
             AppDetailsScreen(
                 modifier = Modifier.padding(padding),
                 app = app,
-                config = config,
+                configs = configs,
                 lockEntry = lockEntry,
                 geminiApiKey = currentLockState?.geminiApiKey.orEmpty(),
                 emergencyCoins = currentLockState?.emergencyCoins ?: 0,
@@ -322,8 +325,8 @@ private fun AppPurgeApp() {
                 onConfigurePurge = { configuringSelectedApp = true },
                 onCancelPurge = {
                     scope.launch {
-                        store.clear()
-                        PurgeScheduler.cancel(context.applicationContext)
+                        store.clear(app.packageName)
+                        PurgeScheduler.scheduleNext(context.applicationContext, store.currentConfigs())
                     }
                 },
                 onToggleLock = {
@@ -422,7 +425,7 @@ private fun AppPurgeApp() {
                             snoozed = false,
                         )
                         store.save(newConfig)
-                        PurgeScheduler.schedule(context.applicationContext, newConfig)
+                        PurgeScheduler.scheduleNext(context.applicationContext, store.currentConfigs())
                         configuringSelectedApp = false
                     }
                 },
@@ -625,16 +628,19 @@ private fun appsForMode(apps: List<InstalledApp>, mode: AppListMode, lockState: 
 @Composable
 private fun HomeScreen(
     modifier: Modifier,
-    config: PurgeConfig?,
+    configs: List<PurgeConfig>,
     apps: List<InstalledApp>,
     onGoToAllApps: () -> Unit,
     onGoToNewApps: () -> Unit,
+    onGoToLockedApps: () -> Unit,
+    lockState: AppLockState?,
     onCancelConfig: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onRequestShizuku: () -> Unit,
 ) {
     val newAppsCount = remember(apps) { appsInstalledThisWeek(apps).size }
+    val lockedAppsCount = lockState?.locks?.size ?: 0
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -664,6 +670,15 @@ private fun HomeScreen(
             }
         }
         item {
+            StatCard(
+                title = "Locked apps",
+                value = lockedAppsCount.toString(),
+                icon = Icons.Filled.Lock,
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onGoToLockedApps,
+            )
+        }
+        item {
             PermissionPanel(
                 onRequestNotificationPermission = onRequestNotificationPermission,
                 onOpenOverlaySettings = onOpenOverlaySettings,
@@ -671,8 +686,8 @@ private fun HomeScreen(
             )
         }
         item {
-            if (config != null) {
-                ActiveConfigCard(config = config, onCancelConfig = onCancelConfig)
+            if (configs.isNotEmpty()) {
+                ActiveConfigsCard(configs = configs, onCancelConfig = onCancelConfig)
             } else {
                 ElevatedCard(
                     modifier = Modifier.fillMaxWidth(),
@@ -763,6 +778,20 @@ private fun AppsScreen(
     onToggleLock: (InstalledApp, Boolean) -> Unit,
     onEmergencyUnlock: (InstalledApp) -> Unit,
 ) {
+    var searchQuery by remember { mutableStateOf("") }
+    val filteredApps = remember(apps, searchQuery) {
+        val query = searchQuery.trim()
+        if (query.isBlank()) {
+            apps
+        } else {
+            apps.filter { app ->
+                app.label.contains(query, ignoreCase = true) ||
+                    app.packageName.contains(query, ignoreCase = true)
+            }
+        }
+    }
+    val currentEmptyMessage = if (searchQuery.isBlank()) emptyMessage else "No apps match your search."
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -773,20 +802,31 @@ private fun AppsScreen(
             Spacer(Modifier.height(4.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
-                )
                 FilledTonalButton(onClick = onBack) {
                     Icon(Icons.Filled.ArrowBack, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Home")
                 }
+                Text(
+                    title,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
             }
+        }
+        item {
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                modifier = Modifier.fillMaxWidth(),
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                singleLine = true,
+                label = { Text("Search apps") },
+            )
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -799,7 +839,7 @@ private fun AppsScreen(
                 }
             }
         }
-        if (apps.isEmpty()) {
+        if (filteredApps.isEmpty()) {
             item {
                 ElevatedCard(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -808,12 +848,12 @@ private fun AppsScreen(
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
                         )
-                        Text(emptyMessage, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(currentEmptyMessage, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
         }
-        items(apps, key = { it.packageName }) { app ->
+        items(filteredApps, key = { it.packageName }) { app ->
             val lockEntry = lockState?.entryForPackage(app.packageName)
             AppRow(
                 app = app,
@@ -882,7 +922,7 @@ private fun AppRow(
 private fun AppDetailsScreen(
     modifier: Modifier,
     app: InstalledApp,
-    config: PurgeConfig?,
+    configs: List<PurgeConfig>,
     lockEntry: com.apppurge.data.AppLockEntry?,
     geminiApiKey: String,
     emergencyCoins: Int,
@@ -904,12 +944,10 @@ private fun AppDetailsScreen(
     val installedAt = remember(app.firstInstallTimeMillis) {
         Instant.ofEpochMilli(app.firstInstallTimeMillis).atZone(ZoneId.systemDefault()).format(formatter)
     }
-    val purgeForThisApp = config?.takeIf { it.packageName == app.packageName }
+    val purgeForThisApp = configs.firstOrNull { it.packageName == app.packageName }
     val purgeText = purgeForThisApp?.let {
         val date = Instant.ofEpochMilli(it.purgeAtMillis).atZone(ZoneId.systemDefault()).format(formatter)
         "Scheduled for $date"
-    } ?: config?.let {
-        "Another app is scheduled: ${it.appName}"
     } ?: "No purge scheduled"
     val lockStatus = when {
         lockEntry == null -> "Not locked"
@@ -1189,13 +1227,16 @@ private fun PermissionRow(
 }
 
 @Composable
-private fun ActiveConfigCard(config: PurgeConfig, onCancelConfig: () -> Unit) {
+private fun ActiveConfigsCard(configs: List<PurgeConfig>, onCancelConfig: () -> Unit) {
     val formatter = remember { DateTimeFormatter.ofPattern("MMM d, yyyy h:mm a") }
-    val purgeDate = remember(config.purgeAtMillis) {
-        Instant.ofEpochMilli(config.purgeAtMillis)
-            .atZone(ZoneId.systemDefault())
-            .toLocalDateTime()
-            .format(formatter)
+    val purgeSummaries = remember(configs) {
+        configs.sortedBy { it.purgeAtMillis }.take(3).map { config ->
+            val purgeDate = Instant.ofEpochMilli(config.purgeAtMillis)
+                .atZone(ZoneId.systemDefault())
+                .toLocalDateTime()
+                .format(formatter)
+            config to purgeDate
+        }
     }
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
@@ -1208,18 +1249,23 @@ private fun ActiveConfigCard(config: PurgeConfig, onCancelConfig: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(
-                "Scheduled purge",
+                if (configs.size == 1) "Scheduled purge" else "Scheduled purges",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
-            Text(config.appName, style = MaterialTheme.typography.titleSmall)
-            Text(purgeDate, color = MaterialTheme.colorScheme.onTertiaryContainer)
-            Text(
-                if (config.allowSnooze) "One 24h snooze allowed" else "No snooze",
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
-            )
+            purgeSummaries.forEach { (config, purgeDate) ->
+                Text(config.appName, style = MaterialTheme.typography.titleSmall)
+                Text(purgeDate, color = MaterialTheme.colorScheme.onTertiaryContainer)
+                Text(
+                    if (config.allowSnooze) "One 24h snooze allowed" else "No snooze",
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                )
+            }
+            if (configs.size > purgeSummaries.size) {
+                Text("+${configs.size - purgeSummaries.size} more", color = MaterialTheme.colorScheme.onTertiaryContainer)
+            }
             OutlinedButton(onClick = onCancelConfig) {
-                Text("Cancel")
+                Text(if (configs.size == 1) "Cancel" else "Cancel all")
             }
         }
     }

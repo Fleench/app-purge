@@ -15,10 +15,14 @@ class PurgeWorker(
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
         val store = PurgeStore(applicationContext)
-        val config = store.config.first() ?: return Result.success()
-
-        if (!AppRepository(applicationContext).isInstalled(config.packageName)) {
-            store.clear()
+        val configs = store.configs.first()
+        val now = System.currentTimeMillis()
+        val repository = AppRepository(applicationContext)
+        configs.filterNot { repository.isInstalled(it.packageName) }.forEach { store.clear(it.packageName) }
+        val activeConfigs = store.currentConfigs()
+        val config = activeConfigs.firstOrNull { it.purgeAtMillis <= now }
+        if (config == null) {
+            PurgeScheduler.scheduleNext(applicationContext, activeConfigs)
             return Result.success()
         }
 

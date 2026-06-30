@@ -18,20 +18,12 @@ class PurgeAlarmReceiver : BroadcastReceiver() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val store = PurgeStore(context.applicationContext)
-                val config = store.currentConfig()
+                val repository = AppRepository(context.applicationContext)
+                store.currentConfigs().filterNot { repository.isInstalled(it.packageName) }.forEach { store.clear(it.packageName) }
+                val configs = store.currentConfigs()
+                val config = configs.firstOrNull { it.purgeAtMillis <= System.currentTimeMillis() }
                 if (config == null) {
-                    PurgeScheduler.cancel(context.applicationContext)
-                    return@launch
-                }
-
-                if (!AppRepository(context.applicationContext).isInstalled(config.packageName)) {
-                    store.clear()
-                    PurgeScheduler.cancel(context.applicationContext)
-                    return@launch
-                }
-
-                if (config.purgeAtMillis > System.currentTimeMillis()) {
-                    PurgeScheduler.schedule(context.applicationContext, config)
+                    PurgeScheduler.scheduleNext(context.applicationContext, configs)
                     return@launch
                 }
 
