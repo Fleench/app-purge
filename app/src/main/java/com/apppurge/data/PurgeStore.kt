@@ -164,6 +164,24 @@ class PurgeStore(private val context: Context) {
         }
     }
 
+    suspend fun revokeEmergencyBypass(packageName: String, refundCoin: Boolean, decision: String, nowMillis: Long = System.currentTimeMillis()) {
+        context.purgeDataStore.edit { preferences ->
+            val state = lockStateFromPreferences(preferences).withEarnedCoins(nowMillis)
+            val entries = state.locks.map { entry ->
+                if (entry.packageName == packageName) {
+                    entry.copy(unlockedUntilMillis = 0L, cooldownUntilMillis = 0L)
+                } else {
+                    entry
+                }
+            }
+            preferences[Keys.AppLockEntries] = encodeLockEntries(entries)
+            preferences[Keys.EmergencyCoins] = if (refundCoin) state.emergencyCoins + 1 else state.emergencyCoins
+            preferences[Keys.LastCoinEarnedDay] = state.lastCoinEarnedDay
+            preferences[Keys.AppLockLastDecision] = decision
+            preferences[Keys.AppLockLastGrantedMinutes] = 0
+        }
+    }
+
     suspend fun save(config: PurgeConfig) {
         context.purgeDataStore.edit { preferences ->
             val configs = purgeConfigsFromPreferences(preferences)

@@ -88,6 +88,7 @@ import com.apppurge.data.PurgeConfig
 import com.apppurge.data.PurgeStore
 import com.apppurge.ui.theme.AppPurgeTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
@@ -245,6 +246,26 @@ private fun AppPurgeApp() {
                 onSaveApiKey = { apiKey -> scope.launch { store.saveGeminiApiKey(apiKey) } },
                 onSaveLockPrompts = { temporaryPrompt, removePrompt ->
                     scope.launch { store.saveLockPrompts(temporaryPrompt, removePrompt) }
+                },
+                onRevokeEmergencyBypass = { entry, reason ->
+                    scope.launch(Dispatchers.IO) {
+                        val state = store.currentLockState()
+                        val key = state.geminiApiKey
+                        if (key.isBlank()) {
+                            store.revokeEmergencyBypass(entry.packageName, false, "Emergency bypass revoked for ${entry.appName}. Save a Gemini API key to request a coin refund.")
+                            return@launch
+                        }
+                        try {
+                            val decision = GeminiLockClient.evaluate(key, entry.appName, entry.reason, reason, LockAction.Unlock, state.temporaryUnlockPrompt, state.removeLockPrompt)
+                            store.revokeEmergencyBypass(
+                                packageName = entry.packageName,
+                                refundCoin = decision.approved,
+                                decision = if (decision.approved) "Emergency bypass revoked and 1 coin refunded: ${decision.reason}" else "Emergency bypass revoked without refund: ${decision.reason}",
+                            )
+                        } catch (error: Exception) {
+                            store.revokeEmergencyBypass(entry.packageName, false, "Emergency bypass revoked. Gemini refund review failed: ${error.message ?: "Unknown error"}")
+                        }
+                    }
                 },
                 onOpenAccessibilitySettings = {
                     context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -895,6 +916,16 @@ private fun AppRow(
     onToggleLock: () -> Unit,
     onEmergencyUnlock: () -> Unit,
 ) {
+    var showEmergencyConfirm by remember { mutableStateOf(false) }
+    if (showEmergencyConfirm) {
+        EmergencyUnlockConfirmDialog(
+            appName = app.label,
+            emergencyCoins = emergencyCoins,
+            onConfirm = { showEmergencyConfirm = false; onEmergencyUnlock() },
+            onDismiss = { showEmergencyConfirm = false },
+        )
+    }
+
     ElevatedCard(
         modifier = Modifier
             .fillMaxWidth()
@@ -924,7 +955,7 @@ private fun AppRow(
                     }
                     if (lockEntry != null) {
                         AssistChip(
-                            onClick = onEmergencyUnlock,
+                            onClick = { showEmergencyConfirm = true },
                             enabled = emergencyCoins > 0,
                             label = { Text("Emergency") },
                         )
@@ -959,6 +990,15 @@ private fun AppDetailsScreen(
     var newLockReason by remember { mutableStateOf("") }
     var removeReason by remember { mutableStateOf("") }
     var apiKey by remember(geminiApiKey) { mutableStateOf(geminiApiKey) }
+    var showEmergencyConfirm by remember { mutableStateOf(false) }
+    if (showEmergencyConfirm) {
+        EmergencyUnlockConfirmDialog(
+            appName = app.label,
+            emergencyCoins = emergencyCoins,
+            onConfirm = { showEmergencyConfirm = false; onEmergencyUnlock() },
+            onDismiss = { showEmergencyConfirm = false },
+        )
+    }
     val now = System.currentTimeMillis()
     val appIcon = remember(app.packageName) { app.icon.toBitmap(width = 128, height = 128).asImageBitmap() }
     val installedAt = remember(app.firstInstallTimeMillis) {
@@ -1062,7 +1102,7 @@ private fun AppDetailsScreen(
                         }
                         if (lockEntry != null) {
                             OutlinedButton(
-                                onClick = onEmergencyUnlock,
+                                onClick = { showEmergencyConfirm = true },
                                 enabled = emergencyCoins > 0,
                                 modifier = Modifier.weight(1f),
                             ) {
@@ -1470,11 +1510,45 @@ private fun SettingsScreen(
     onBack: () -> Unit,
     onSaveApiKey: (String) -> Unit,
     onSaveLockPrompts: (String, String) -> Unit,
+    onRevokeEmergencyBypass: (com.apppurge.data.AppLockEntry, String) -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
 ) {
     var apiKey by remember(lockState?.geminiApiKey) { mutableStateOf(lockState?.geminiApiKey.orEmpty()) }
     var temporaryPrompt by remember(lockState?.temporaryUnlockPrompt) { mutableStateOf(lockState?.temporaryUnlockPrompt.orEmpty()) }
     var removePrompt by remember(lockState?.removeLockPrompt) { mutableStateOf(lockState?.removeLockPrompt.orEmpty()) }
+    var refundEntry by remember { mutableStateOf<com.apppurge.data.AppLockEntry?>(null) }
+    var refundReason by remember { mutableStateOf("") }
+    val now = System.currentTimeMillis()
+
+    refundEntry?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { refundEntry = null },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onRevokeEmergencyBypass(entry, refundReason)
+                        refundEntry = null
+                        refundReason = ""
+                    },
+                    enabled = refundReason.isNotBlank(),
+                ) { Text("Revoke and ask Gemini") }
+            },
+            dismissButton = { TextButton(onClick = { refundEntry = null }) { Text("Cancel") } },
+            title = { Text("Revoke emergency bypass") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("This immediately locks ${entry.appName} again. Gemini will use the temporary unlock prompt to decide whether your case deserves the emergency coin back.")
+                    OutlinedTextField(
+                        value = refundReason,
+                        onValueChange = { refundReason = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Make your case to Gemini") },
+                        minLines = 3,
+                    )
+                }
+            },
+        )
+    }
 
     LazyColumn(
         modifier = modifier
@@ -1554,7 +1628,19 @@ private fun SettingsScreen(
                         Text("Emergency coins: ${state.emergencyCoins} (earn 1 per day)", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     lockState?.locks?.forEach { entry ->
-                        Text("• ${entry.appName}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        val bypassActive = entry.unlockedUntilMillis > now
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("• ${entry.appName}", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                            if (bypassActive) {
+                                TextButton(onClick = { refundEntry = entry }) {
+                                    Text("Revoke bypass")
+                                }
+                            }
+                        }
                     }
                     Text("Lock and unlock apps from the Apps page. App Purge stays available so you can request temporary Gemini unlocks when a locked app opens.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     lockState?.lastDecision?.takeIf { it.isNotBlank() }?.let {
@@ -1564,6 +1650,34 @@ private fun SettingsScreen(
             }
         }
     }
+}
+
+@Composable
+private fun EmergencyUnlockConfirmDialog(
+    appName: String,
+    emergencyCoins: Int,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var secondsRemaining by remember { mutableStateOf(10) }
+    LaunchedEffect(Unit) {
+        while (secondsRemaining > 0) {
+            delay(1_000L)
+            secondsRemaining -= 1
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                enabled = secondsRemaining == 0 && emergencyCoins > 0,
+            ) { Text(if (secondsRemaining == 0) "Yes, spend 1 coin" else "Yes loads in ${secondsRemaining}s") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        title = { Text("Are you sure?") },
+        text = { Text("Emergency unlock for ${appName.ifBlank { "this app" }} spends 1 coin and bypasses the lock for 3 hours.") },
+    )
 }
 
 @Composable
@@ -1581,10 +1695,20 @@ private fun LockPopup(
     var apiKey by remember(lockState.geminiApiKey) { mutableStateOf(lockState.geminiApiKey) }
     var reason by remember { mutableStateOf("") }
     var showRequest by remember { mutableStateOf(false) }
+    var showEmergencyConfirm by remember { mutableStateOf(false) }
     var action by remember { mutableStateOf(LockAction.Unlock) }
     val formatter = remember { DateTimeFormatter.ofPattern("MMM d h:mm a") }
     val cooldown = lockEntry.cooldownUntilMillis.takeIf { it > System.currentTimeMillis() }?.let {
         Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()).format(formatter)
+    }
+
+    if (showEmergencyConfirm) {
+        EmergencyUnlockConfirmDialog(
+            appName = lockEntry.appName,
+            emergencyCoins = lockState.emergencyCoins,
+            onConfirm = { showEmergencyConfirm = false; onEmergencyUnlock() },
+            onDismiss = { showEmergencyConfirm = false },
+        )
     }
 
     if (requestResult != null) {
@@ -1614,7 +1738,7 @@ private fun LockPopup(
         confirmButton = {
             if (cooldown != null) {
                 Button(
-                    onClick = onEmergencyUnlock,
+                    onClick = { showEmergencyConfirm = true },
                     enabled = lockState.emergencyCoins > 0,
                 ) { Text("Emergency unlock") }
             } else if (showRequest) {
