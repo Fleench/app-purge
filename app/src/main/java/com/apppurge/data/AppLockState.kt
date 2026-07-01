@@ -13,6 +13,8 @@ data class AppLockState(
     val locks: List<AppLockEntry>,
     val lastDecision: String,
     val lastGrantedMinutes: Int,
+    val temporaryUnlockPrompt: String,
+    val removeLockPrompt: String,
     val emergencyCoins: Int,
     val lastCoinEarnedDay: Long,
 ) {
