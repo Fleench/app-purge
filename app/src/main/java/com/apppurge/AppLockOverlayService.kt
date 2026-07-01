@@ -278,7 +278,7 @@ class AppLockOverlayService : Service() {
             }
             try {
                 val decision = withContext(Dispatchers.IO) {
-                    GeminiLockClient.evaluate(key, entry.appName, entry.reason, message, action)
+                    GeminiLockClient.evaluate(key, entry.appName, entry.reason, message, action, state.temporaryUnlockPrompt, state.removeLockPrompt)
                 }
                 val now = System.currentTimeMillis()
                 if (decision.approved && action == LockAction.Remove) {

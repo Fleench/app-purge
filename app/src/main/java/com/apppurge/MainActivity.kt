@@ -243,6 +243,9 @@ private fun AppPurgeApp() {
                 apps = apps,
                 onBack = { currentPage = AppPage.Home },
                 onSaveApiKey = { apiKey -> scope.launch { store.saveGeminiApiKey(apiKey) } },
+                onSaveLockPrompts = { temporaryPrompt, removePrompt ->
+                    scope.launch { store.saveLockPrompts(temporaryPrompt, removePrompt) }
+                },
                 onOpenAccessibilitySettings = {
                     context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                 },
@@ -344,9 +347,9 @@ private fun AppPurgeApp() {
                         PurgeScheduler.scheduleNext(context.applicationContext, store.currentConfigs())
                     }
                 },
-                onToggleLock = {
+                onToggleLock = { reason ->
                     scope.launch {
-                        if (lockEntry == null) store.enableAppLock(app.packageName, app.label)
+                        if (lockEntry == null) store.enableAppLock(app.packageName, app.label, reason)
                     }
                 },
                 onRequestRemoveLock = { reason ->
@@ -380,7 +383,7 @@ private fun AppPurgeApp() {
                             return@launch
                         }
                         try {
-                            val decision = GeminiLockClient.evaluate(key, entry.appName, entry.reason, reason, LockAction.Remove)
+                            val decision = GeminiLockClient.evaluate(key, entry.appName, entry.reason, reason, LockAction.Remove, state.temporaryUnlockPrompt, state.removeLockPrompt)
                             if (decision.approved) {
                                 store.disableAppLock(entry.packageName, "Gemini approved removing the lock: ${decision.reason}")
                             } else {
@@ -513,7 +516,7 @@ private fun AppPurgeApp() {
                             }
                             return@launch
                         }
-                        val decision = GeminiLockClient.evaluate(state.geminiApiKey, entry.appName, entry.reason, reason, action)
+                        val decision = GeminiLockClient.evaluate(state.geminiApiKey, entry.appName, entry.reason, reason, action, state.temporaryUnlockPrompt, state.removeLockPrompt)
                         if (decision.approved && action == LockAction.Remove) {
                             store.disableAppLock(entry.packageName, "Gemini approved removing the lock: ${decision.reason}")
                             withContext(Dispatchers.Main) {
@@ -946,12 +949,14 @@ private fun AppDetailsScreen(
     onSaveApiKey: (String) -> Unit,
     onConfigurePurge: () -> Unit,
     onCancelPurge: () -> Unit,
-    onToggleLock: () -> Unit,
+    onToggleLock: (String) -> Unit,
     onRequestRemoveLock: (String) -> Unit,
     onEmergencyUnlock: () -> Unit,
 ) {
     val formatter = remember { DateTimeFormatter.ofPattern("MMM d, yyyy h:mm a") }
     var showRemoveLockRequest by remember { mutableStateOf(false) }
+    var showAddLockReason by remember { mutableStateOf(false) }
+    var newLockReason by remember { mutableStateOf("") }
     var removeReason by remember { mutableStateOf("") }
     var apiKey by remember(geminiApiKey) { mutableStateOf(geminiApiKey) }
     val now = System.currentTimeMillis()
@@ -1043,7 +1048,7 @@ private fun AppDetailsScreen(
                     StatusLine("Emergency coins", emergencyCoins.toString())
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         if (lockEntry == null) {
-                            Button(onClick = onToggleLock, modifier = Modifier.weight(1f)) {
+                            Button(onClick = { showAddLockReason = true }, modifier = Modifier.weight(1f)) {
                                 Text("Lock app")
                             }
                         } else {
@@ -1080,6 +1085,33 @@ private fun AppDetailsScreen(
             }
         }
         item { Spacer(Modifier.height(24.dp)) }
+    }
+
+    if (showAddLockReason && lockEntry == null) {
+        AlertDialog(
+            onDismissRequest = { showAddLockReason = false },
+            confirmButton = {
+                Button(onClick = {
+                    onToggleLock(newLockReason)
+                    showAddLockReason = false
+                    newLockReason = ""
+                }) { Text("Save lock") }
+            },
+            dismissButton = { TextButton(onClick = { showAddLockReason = false }) { Text("Cancel") } },
+            title = { Text("Add lock reason") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Tell Gemini why ${app.label} should stay locked. You can leave this blank, but a reason makes unlock decisions more useful.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    OutlinedTextField(
+                        value = newLockReason,
+                        onValueChange = { newLockReason = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Lock reason") },
+                        minLines = 3,
+                    )
+                }
+            },
+        )
     }
 
     if (showRemoveLockRequest && lockEntry != null) {
@@ -1437,9 +1469,12 @@ private fun SettingsScreen(
     apps: List<InstalledApp>,
     onBack: () -> Unit,
     onSaveApiKey: (String) -> Unit,
+    onSaveLockPrompts: (String, String) -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
 ) {
     var apiKey by remember(lockState?.geminiApiKey) { mutableStateOf(lockState?.geminiApiKey.orEmpty()) }
+    var temporaryPrompt by remember(lockState?.temporaryUnlockPrompt) { mutableStateOf(lockState?.temporaryUnlockPrompt.orEmpty()) }
+    var removePrompt by remember(lockState?.removeLockPrompt) { mutableStateOf(lockState?.removeLockPrompt.orEmpty()) }
 
     LazyColumn(
         modifier = modifier
@@ -1474,6 +1509,31 @@ private fun SettingsScreen(
                     )
                     Button(onClick = { onSaveApiKey(apiKey) }, modifier = Modifier.fillMaxWidth()) {
                         Text("Save API key")
+                    }
+                }
+            }
+        }
+        item {
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Gemini unlock prompts", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text("Customize Gemini's decision guidance. App Purge always appends required JSON response rules so custom prompts cannot break unlock parsing.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    OutlinedTextField(
+                        value = temporaryPrompt,
+                        onValueChange = { temporaryPrompt = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Temporary unlock prompt") },
+                        minLines = 4,
+                    )
+                    OutlinedTextField(
+                        value = removePrompt,
+                        onValueChange = { removePrompt = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Permanent unlock prompt") },
+                        minLines = 4,
+                    )
+                    Button(onClick = { onSaveLockPrompts(temporaryPrompt, removePrompt) }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Save prompts")
                     }
                 }
             }

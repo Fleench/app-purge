@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import org.json.JSONObject
+import com.apppurge.GeminiLockClient
 import java.io.IOException
 
 private val Context.purgeDataStore: DataStore<Preferences> by preferencesDataStore("purge_config")
@@ -41,6 +42,8 @@ class PurgeStore(private val context: Context) {
         val AppLockLastGrantedMinutes = intPreferencesKey("app_lock_last_granted_minutes")
         val EmergencyCoins = intPreferencesKey("app_lock_emergency_coins")
         val LastCoinEarnedDay = longPreferencesKey("app_lock_last_coin_earned_day")
+        val TemporaryUnlockPrompt = stringPreferencesKey("app_lock_temporary_unlock_prompt")
+        val RemoveLockPrompt = stringPreferencesKey("app_lock_remove_lock_prompt")
     }
 
     val preferences: Flow<Preferences> = context.purgeDataStore.data
@@ -66,6 +69,19 @@ class PurgeStore(private val context: Context) {
     suspend fun saveGeminiApiKey(apiKey: String) {
         context.purgeDataStore.edit { preferences ->
             preferences[Keys.GeminiApiKey] = apiKey.trim()
+        }
+    }
+
+    suspend fun saveLockPrompts(temporaryUnlockPrompt: String, removeLockPrompt: String) {
+        context.purgeDataStore.edit { preferences ->
+            preferences[Keys.TemporaryUnlockPrompt] = temporaryUnlockPrompt.trim()
+            preferences[Keys.RemoveLockPrompt] = removeLockPrompt.trim()
+        }
+    }
+
+    suspend fun updateAppLockReason(packageName: String, reason: String) {
+        updateLock(packageName, "Lock reason updated.", 0) { entry ->
+            entry.copy(reason = reason.trim())
         }
     }
 
@@ -266,6 +282,8 @@ class PurgeStore(private val context: Context) {
             locks = decodeLockEntries(preferences[Keys.AppLockEntries].orEmpty(), preferences),
             lastDecision = preferences[Keys.AppLockLastDecision].orEmpty(),
             lastGrantedMinutes = preferences[Keys.AppLockLastGrantedMinutes] ?: 0,
+            temporaryUnlockPrompt = preferences[Keys.TemporaryUnlockPrompt].orEmpty().ifBlank { GeminiLockClient.DEFAULT_TEMPORARY_UNLOCK_PROMPT },
+            removeLockPrompt = preferences[Keys.RemoveLockPrompt].orEmpty().ifBlank { GeminiLockClient.DEFAULT_REMOVE_LOCK_PROMPT },
             emergencyCoins = startingCoins,
             lastCoinEarnedDay = startingDay,
         ).withEarnedCoins()
